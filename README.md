@@ -52,6 +52,41 @@ uv run agent token list
 uv run agent token revoke <hash-prefix>
 ```
 
+## launchd schedules (M7)
+
+Three jobs ship in `triggers/launchd/`:
+
+| Plist | Schedule | Purpose |
+|---|---|---|
+| `com.shupei.agent.morning_brief.plist` | 7:00 daily | Run morning_brief, deliver via iMessage |
+| `com.shupei.agent.memory_prune.plist`  | 3:30 daily | Decay confidences, archive low-confidence, prune expired |
+| `com.shupei.agent.critic_sweep.plist`  | hourly     | Review any sessions whose inline critic was dropped |
+
+Install / uninstall / status:
+
+```bash
+uv run python -m admin.launchd install
+uv run python -m admin.launchd status
+uv run python -m admin.launchd uninstall
+```
+
+The install step copies templates into `~/Library/LaunchAgents/`, rewriting the
+hardcoded `/Users/smo` path to your actual home, and bootstraps each one into
+your gui domain.
+
+**Mac sleep / wake.** launchd does fire at the scheduled time only if the Mac is
+awake or `pmset` has scheduled a wake. Two options:
+1. **Always-on Mac** (recommended for the agent host): System Settings →
+   Energy → "Prevent automatic sleeping when display is off."
+2. **Scheduled wake**:
+   ```bash
+   sudo pmset repeat wakeorpoweron MTWRF 06:55:00
+   ```
+   This wakes the Mac at 06:55 weekdays so the 07:00 brief runs reliably.
+
+`caffeinate -s` inside the brief itself isn't needed unless the brief is long-
+running; the spawn-per-task model means each invocation is short.
+
 ## iOS Shortcut — "Ask Agent" (M5)
 
 Each family member installs this Shortcut on their iPhone (Action Button or Back Tap):

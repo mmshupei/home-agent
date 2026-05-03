@@ -144,20 +144,49 @@ async def morning_brief(args):
     except Exception as e:
         parts.append(f"\n## Finance\n_(read failed: {e})_")
 
-    # HA — only if configured
+    # HA — only if configured. Adapts to whatever entities exist; flags
+    # door/lock/cover that's unlocked/open and any unavailable entities.
     if ha.is_configured():
         try:
-            # Cheap snapshot: door lock + thermostat
-            lock_st = await ha.get_state("lock.front_door")
-            climate_st = await ha.get_state("climate.main")
-            ha_lines = []
-            if lock_st:
-                ha_lines.append(f"- front door: {lock_st['state']}")
-            if climate_st:
-                temp = climate_st.get("attributes", {}).get("current_temperature")
-                ha_lines.append(f"- thermostat: {climate_st['state']} ({temp}°F)")
-            if ha_lines:
-                parts.append("\n## Home\n" + "\n".join(ha_lines))
+            states = await ha.get_states()
+            ha_lines: list[str] = []
+
+            # Anomaly surface: doors unlocked, covers open, alarm disarmed.
+            for s in states:
+                eid = s["entity_id"]
+                st = s["state"]
+                if eid.startswith("lock.") and st == "unlocked":
+                    ha_lines.append(f"- ⚠️ {eid}: unlocked")
+                elif eid.startswith("cover.") and st == "open":
+                    ha_lines.append(f"- ⚠️ {eid}: open")
+                elif eid.startswith("alarm_control_panel.") and st in ("disarmed", "pending"):
+                    ha_lines.append(f"- ⚠️ {eid}: {st}")
+                elif st == "unavailable" and eid.split(".")[0] in (
+                    "lock", "climate", "alarm_control_panel", "cover", "binary_sensor"
+                ):
+                    ha_lines.append(f"- ⚠️ {eid}: unavailable")
+
+            # Notable single-entity reads, only if present.
+            for eid in ("climate.main", "weather.home", "weather.forecast_home"):
+                hit = next((s for s in states if s["entity_id"] == eid), None)
+                if hit:
+                    attrs = hit.get("attributes", {})
+                    if eid.startswith("climate."):
+                        ha_lines.append(
+                            f"- {eid}: {hit['state']} "
+                            f"({attrs.get('current_temperature', '?')}°F)"
+                        )
+                    elif eid.startswith("weather."):
+                        t = attrs.get("temperature")
+                        ha_lines.append(f"- {eid}: {hit['state']}, {t}° if known")
+
+            # Always show a domain count summary as the floor.
+            from collections import Counter
+            domains = Counter(s["entity_id"].split(".")[0] for s in states)
+            top = ", ".join(f"{d}:{n}" for d, n in domains.most_common(6))
+            ha_lines.append(f"- _{len(states)} entities · {top}_")
+
+            parts.append("\n## Home\n" + "\n".join(ha_lines))
         except Exception as e:
             parts.append(f"\n## Home\n_(HA read failed: {e})_")
 

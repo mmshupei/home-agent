@@ -17,6 +17,11 @@ tier    = 1
 pattern = "^memory__read"
 tier    = 1
 
+# Claude CLI built-in meta tools that are read-only.
+[[rule]]
+pattern = "^(ToolSearch|TodoWrite|Read|Glob|Grep|WebFetch|WebSearch|NotebookRead|BashOutput)$"
+tier    = 1
+
 # Curated routines: rated at the tier of their highest sub-action.
 [[rule]]
 pattern = "^morning_brief$"

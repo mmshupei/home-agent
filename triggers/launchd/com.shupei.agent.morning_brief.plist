@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.shupei.agent.morning_brief</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/smo/repos/home-agent/bin/agent</string>
+        <string>--principal</string>
+        <string>shupei</string>
+        <string>--profile</string>
+        <string>unattended</string>
+        <string>--task</string>
+        <string>Use the morning_brief tool, then send the result to me via iMessage at the handle stored on my user record. If iMessage isn't set up yet, just print the brief.</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>7</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/smo/repos/home-agent</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- launchd does not source ~/.zshenv. Set anything the loop needs here.
+             Secrets stay in .env and are loaded by the CLI/HTTP entrypoints
+             via python-dotenv. -->
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/smo</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/smo/repos/home-agent/data/runs/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/smo/repos/home-agent/data/runs/launchd.err</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Catch any sessions whose inline critic was dropped because the CLI
+         loop closed before the background task finished. Runs hourly,
+         reviews every session that has zero critic_findings rows. -->
+    <key>Label</key>
+    <string>com.shupei.agent.critic_sweep</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/uv</string>
+        <string>run</string>
+        <string>python</string>
+        <string>-m</string>
+        <string>admin.critic_sweep</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>3600</integer>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/smo/repos/home-agent</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/smo</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/smo/repos/home-agent/data/runs/critic_sweep.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/smo/repos/home-agent/data/runs/critic_sweep.err</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
