@@ -303,6 +303,95 @@ async def _surface_pending_dream_proposal(
 # returns rows still pending in the DB anyway.
 _surfaced_dream_props: dict[int, set[str]] = {}
 
+# Same idea for stale beads tasks. Plus a per-user cooldown so we don't
+# pester them with the same task over and over inside one chat session.
+_surfaced_stale_tasks: dict[int, set[str]] = {}
+_last_stale_check: dict[int, float] = {}
+STALE_CHECK_COOLDOWN_SEC = 60 * 60 * 4   # don't re-scan more than every 4h
+
+
+async def _surface_stale_task(
+    update: Update, principal: auth.Principal
+) -> bool:
+    """If `bd stale` returns anything we haven't shown this session, surface
+    ONE task as a card with [✓ Done] [✗ Drop] [⟳ Resume] buttons. Cheap
+    cooldown so we don't shell out every message."""
+    import json as _json
+    import subprocess as _subprocess
+
+    if principal.role not in ("admin", "adult"):
+        return False
+
+    now = time.time()
+    last = _last_stale_check.get(update.effective_user.id, 0.0)
+    if now - last < STALE_CHECK_COOLDOWN_SEC:
+        return False
+    _last_stale_check[update.effective_user.id] = now
+
+    try:
+        cp = _subprocess.run(
+            ["bd", "stale", "--json"],
+            capture_output=True, text=True, timeout=15,
+            cwd="/Users/smo/repos/home-agent",
+        )
+        if cp.returncode != 0 or not cp.stdout.strip():
+            return False
+        parsed = _json.loads(cp.stdout)
+    except Exception as e:
+        print(f"[bd] stale check error (non-fatal): {e}")
+        return False
+
+    # Normalize possible shapes: [], [{...}], {"issues": [...]}, {"error": "..."}
+    if isinstance(parsed, dict):
+        if "error" in parsed:
+            print(f"[bd] stale error from CLI: {parsed['error']}")
+            return False
+        items = parsed.get("issues") or []
+    elif isinstance(parsed, list):
+        items = parsed
+    else:
+        items = []
+
+    if not items:
+        return False
+
+    seen = _surfaced_stale_tasks.setdefault(update.effective_user.id, set())
+    for item in items:
+        tid = item.get("id") or item.get("ID")
+        if not tid or tid in seen:
+            continue
+        seen.add(tid)
+        title = item.get("title") or item.get("Title") or "(no title)"
+        updated = item.get("updated_at") or item.get("UpdatedAt") or "?"
+        body = (
+            f"📌 *I've been holding onto this:*\n\n"
+            f"_{title}_\n\n"
+            f"`{tid}` · last touched {updated}\n\n"
+            f"Want me to push on it, or drop it?"
+        )
+        keyboard = {
+            "inline_keyboard": [[
+                {"text": "⟳ Resume",  "callback_data": f"bd_resume:{tid}"},
+                {"text": "✓ Done",    "callback_data": f"bd_done:{tid}"},
+                {"text": "✗ Drop",    "callback_data": f"bd_drop:{tid}"},
+            ]]
+        }
+        token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        if not token:
+            return False
+        async with httpx.AsyncClient(timeout=10) as c:
+            await c.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={
+                    "chat_id": update.effective_chat.id,
+                    "text": body,
+                    "parse_mode": "Markdown",
+                    "reply_markup": keyboard,
+                },
+            )
+        return True
+    return False
+
 
 def _quoted_context(update: Update) -> str:
     """If the user used Telegram's 'reply to' on a previous message, render
@@ -345,13 +434,18 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
         return
 
-    # Proactively surface ONE pending dream proposal (if any) BEFORE we run
-    # the user's task. They can decide on it asynchronously via the buttons
-    # while the agent works on whatever they actually asked.
+    # Proactively surface ONE pending dream proposal AND/OR ONE stale task
+    # (if any) BEFORE we run the user's task. They can decide on those
+    # asynchronously via the buttons while the agent works on whatever they
+    # actually asked.
     try:
         await _surface_pending_dream_proposal(update, principal)
     except Exception as e:
-        print(f"[surface] error (non-fatal): {e}")
+        print(f"[surface] dream error (non-fatal): {e}")
+    try:
+        await _surface_stale_task(update, principal)
+    except Exception as e:
+        print(f"[surface] bd stale error (non-fatal): {e}")
 
     quoted = _quoted_context(update)
     if quoted:
@@ -435,6 +529,41 @@ async def on_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         await cq.answer()
         print(f"[approval] {payload_id} -> {action} by tg={update.effective_user.id}")
+        return
+
+    # ----- Beads stale-task surface -----
+    if action in ("bd_resume", "bd_done", "bd_drop"):
+        import subprocess as _subprocess
+        tid = payload_id
+        try:
+            if action == "bd_resume":
+                # Bump priority so it shows up in `bd ready` next time and
+                # add a note so the touch is real.
+                _subprocess.run(["bd", "note", tid, "Resumed by Shupei via Telegram"],
+                                capture_output=True, timeout=10,
+                                cwd="/Users/smo/repos/home-agent")
+                msg = f"⟳ Resumed: `{tid}`"
+            elif action == "bd_done":
+                _subprocess.run(["bd", "close", tid],
+                                capture_output=True, timeout=10,
+                                cwd="/Users/smo/repos/home-agent")
+                msg = f"✓ Closed: `{tid}`"
+            elif action == "bd_drop":
+                # 'drop' = close with a reason; beads doesn't have a separate
+                # 'abandoned' state, so we close + note.
+                _subprocess.run(["bd", "note", tid, "Dropped (no longer relevant)"],
+                                capture_output=True, timeout=10,
+                                cwd="/Users/smo/repos/home-agent")
+                _subprocess.run(["bd", "close", tid],
+                                capture_output=True, timeout=10,
+                                cwd="/Users/smo/repos/home-agent")
+                msg = f"✗ Dropped: `{tid}`"
+            await cq.edit_message_text(text=msg, parse_mode="Markdown")
+        except Exception as e:
+            await cq.edit_message_text(text=f"⚠️ couldn't update `{tid}`: {e}",
+                                        parse_mode="Markdown")
+        await cq.answer()
+        print(f"[bd] {tid} -> {action} by tg={update.effective_user.id}")
         return
 
     # ----- Dream proposal -----

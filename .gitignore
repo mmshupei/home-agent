@@ -18,3 +18,8 @@ agents-dream/
 .pytest_cache/
 .ruff_cache/
 .DS_Store
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
