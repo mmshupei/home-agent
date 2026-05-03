@@ -43,7 +43,7 @@ from telegram.ext import (
     filters,
 )
 
-from orchestrator import approvals, auth, loop, memory as mem
+from orchestrator import approvals, auth, loop, memory as mem, threads
 from orchestrator.db import connect, ensure_schema
 from orchestrator.dream import proposals as dream_proposals
 
@@ -455,9 +455,33 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     _record_thread(tg_user.id, "them", text)
 
+    # Persistent conversation-thread state. Increments turn_count and
+    # last_active on the open thread (or opens a new one). Ren can
+    # introspect via thread__status / decide via thread__compact.
+    thread_state = None
+    try:
+        thread_state = threads.record_turn(
+            "telegram", principal.user_id, last_turn_text=text
+        )
+    except Exception as e:
+        print(f"[thread] record_turn error (non-fatal): {e}")
+
+    # Inject lightweight thread metadata so Ren can decide without having
+    # to call thread__status on every message. They can still call it for
+    # the full picture.
+    thread_meta = ""
+    if thread_state:
+        thread_meta = (
+            f"## Conversation thread state\n"
+            f"- thread #{thread_state.id} on telegram\n"
+            f"- turn {thread_state.turn_count} · started {thread_state.started_at}\n"
+            f"- if this thread feels concluded or has drifted, consider "
+            f"`thread__compact` with a summary; otherwise just continue."
+        )
+
     thread = _thread_context(tg_user.id)
-    # Order: thread context (broad) → quoted (narrow, specific) → the message.
-    parts = [p for p in (thread, quoted) if p]
+    # Order: rolling buffer (broad) → quoted (narrow) → thread meta (decision aid) → the message.
+    parts = [p for p in (thread, quoted, thread_meta) if p]
     task = ("\n\n".join(parts) + "\n\n" + text) if parts else text
 
     # Run loop.run() with a parallel "warm" coroutine that keeps the typing

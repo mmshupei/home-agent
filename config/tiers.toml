@@ -35,6 +35,14 @@ tier    = 3
 pattern = "^finance__(get_|list_)"
 tier    = 1
 
+# Conversation thread introspection / compacting.
+[[rule]]
+pattern = "^thread__(status|keep|recent)$"
+tier    = 1
+[[rule]]
+pattern = "^thread__compact$"
+tier    = 2
+
 # Ren's mutable skill registry. invoke is L1 (returns text; constituent
 # tool calls fire the gate normally). delete is L3 (capability removal).
 [[rule]]

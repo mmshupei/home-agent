@@ -36,6 +36,7 @@ from tools.sdk_mcp.reachy_tools import reachy_tools
 from tools.sdk_mcp.routines import routines
 from tools.sdk_mcp.skill_tools import build_skill_tools
 from tools.sdk_mcp.test_tools import test_tools
+from tools.sdk_mcp.thread_tools import build_thread_tools
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = REPO_ROOT / "config" / "prompts"
@@ -118,6 +119,10 @@ async def run(
     routines_server = create_sdk_mcp_server("routines", "0.1.0", tools=routines())
     reachy_server = create_sdk_mcp_server("reachy", "0.1.0", tools=reachy_tools())
     skill_server = create_sdk_mcp_server("skill", "0.1.0", tools=build_skill_tools(principal))
+    thread_server = create_sdk_mcp_server(
+        "thread", "0.1.0",
+        tools=build_thread_tools(principal, default_surface=source or "telegram"),
+    )
 
     # Auth: subscription (claude /login) by default; set AGENT_USE_SUBSCRIPTION=0
     # to fall back to the API key in the parent shell env.
@@ -138,6 +143,7 @@ async def run(
             "routines": routines_server,
             "reachy": reachy_server,
             "skill": skill_server,
+            "thread": thread_server,
         },
         permission_mode="default",
         cwd=str(REPO_ROOT),

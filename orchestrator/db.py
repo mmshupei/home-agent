@@ -235,6 +235,32 @@ CREATE TABLE IF NOT EXISTS night_cycles (
 );
 CREATE INDEX IF NOT EXISTS idx_night_cycles_ran ON night_cycles(ran_at);
 
+-- Conversation threads. A thread is a multi-turn arc on a single surface
+-- (Telegram, iMessage, etc.) for one principal. Ren can introspect the
+-- current thread (status: when it started, turn count, time since last
+-- activity) and decide to keep waiting in it OR compact it (write a
+-- summary memory, mark closed) so the next turn starts fresh.
+--
+-- Constraint: at most ONE open thread per (surface, principal) at a time.
+-- Closing one is the precondition for the next inbound creating a new one.
+CREATE TABLE IF NOT EXISTS conversation_threads (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    surface         TEXT NOT NULL,           -- 'telegram'|'imessage'|'cli'|...
+    principal       TEXT NOT NULL,
+    started_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_active     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    closed_at       TIMESTAMP,               -- null = still open
+    closed_reason   TEXT,                    -- 'compacted'|'idle'|'manual'
+    summary         TEXT,                    -- written on compact
+    turn_count      INTEGER DEFAULT 0,
+    last_turn_text  TEXT                     -- short tail of most recent user turn
+);
+-- Partial-unique on open rows: only one open thread per (surface, principal).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_threads_one_open
+    ON conversation_threads(surface, principal) WHERE closed_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_threads_recent
+    ON conversation_threads(surface, principal, last_active DESC);
+
 -- Ren's mutable capability surface. A skill is a named, persistent prompt
 -- Ren writes for themselves so they can recall a procedure later instead of
 -- re-deriving it. Invocation = the agent reads the prompt from the tool
