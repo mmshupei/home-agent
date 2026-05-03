@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from datetime import datetime
 
@@ -23,6 +24,7 @@ from rich.table import Table
 from orchestrator import auth, critic, loop, night_cycle
 from orchestrator import memory as mem
 from orchestrator.db import connect, ensure_schema, has_vec
+from orchestrator.dream import cycle as dream_cycle, proposals as dream_proposals
 
 console = Console()
 
@@ -157,6 +159,78 @@ def cmd_memory_revert_cycle(args: argparse.Namespace) -> int:
     n = mem.revert_cycle(args.cycle_run_at)
     console.print(f"reverted {n} memory revision(s) from cycle ran at {args.cycle_run_at}")
     return 0
+
+
+def cmd_dream_run(args: argparse.Namespace) -> int:
+    """Run one dream cycle. Spawns a sandbox, drives the dream agent, emits
+    proposals to the review queue. M11.1 supports memory_correction kind only."""
+    res = asyncio.run(dream_cycle.run())
+    console.print(
+        f"\n[bold]dream cycle {res['cycle_id']}[/bold] "
+        f"({res['duration_s']}s)\n"
+        f"  inventory={res['inventory_size']} pairs={res['similarity_pairs']} "
+        f"stale={res['stale_candidates']}\n"
+        f"  proposals: emitted={res['proposals_emitted']} "
+        f"rejected={res['proposals_rejected']}\n"
+        f"  queue: {res['queue_path']}\n\n"
+        f"[dim]reflection:[/dim] {res['reflection']}"
+    )
+    if res["proposals_emitted"]:
+        console.print("\n[yellow]Review pending proposals:[/yellow]  agent dream list")
+    return 0
+
+
+def cmd_dream_list(args: argparse.Namespace) -> int:
+    rows = dream_proposals.list_pending()
+    if not rows:
+        console.print("[dim](no pending proposals)[/dim]")
+        return 0
+    table = Table(title=f"pending dream proposals ({len(rows)})")
+    for col in ("id", "kind", "title", "rationale"):
+        table.add_column(col)
+    for r in rows:
+        table.add_row(
+            r["id"], r["kind"],
+            (r["title"][:40] + "…") if len(r["title"]) > 40 else r["title"],
+            (r["rationale"][:80] + "…") if len(r["rationale"]) > 80 else r["rationale"],
+        )
+    console.print(table)
+    console.print("\n[dim]Inspect: agent dream show <id>   Approve: agent dream approve <id>   Reject: agent dream reject <id> '<reason>'[/dim]")
+    return 0
+
+
+def cmd_dream_show(args: argparse.Namespace) -> int:
+    p = dream_proposals.get(args.id)
+    if not p:
+        console.print(f"[red]no such proposal: {args.id}[/red]")
+        return 1
+    console.print(f"[bold cyan]{p['id']}[/bold cyan]  state=[magenta]{p['state']}[/magenta]")
+    console.print(f"  kind: {p['kind']}")
+    console.print(f"  title: {p['title']}")
+    console.print(f"  rationale: {p['rationale']}")
+    console.print(f"  payload: {json.dumps(p['payload'], indent=2)}")
+    console.print(f"  artifacts: {p['artifact_dir']}")
+    if p.get("decided_at"):
+        console.print(f"  decided: {p['decided_at']} by {p.get('decided_by')} ({p.get('decision_reason') or ''})")
+    return 0
+
+
+def cmd_dream_approve(args: argparse.Namespace) -> int:
+    ok, msg = dream_proposals.approve(args.id, decided_by="cli:shupei")
+    if ok:
+        console.print(f"[green]approved:[/green] {msg}")
+        return 0
+    console.print(f"[red]not approved:[/red] {msg}")
+    return 1
+
+
+def cmd_dream_reject(args: argparse.Namespace) -> int:
+    ok = dream_proposals.reject(args.id, decided_by="cli:shupei", reason=args.reason)
+    if ok:
+        console.print("rejected")
+        return 0
+    console.print(f"[red]could not reject {args.id} (already decided?)[/red]")
+    return 1
 
 
 def cmd_critic_recent(args: argparse.Namespace) -> int:
@@ -475,6 +549,24 @@ def build_parser() -> argparse.ArgumentParser:
     nch = nc.add_parser("history")
     nch.add_argument("--limit", type=int, default=10)
     nch.set_defaults(func=cmd_night_cycle_history)
+
+    dream = sub.add_parser("dream", help="run / review M11 dream cycle proposals").add_subparsers(
+        dest="dream_cmd"
+    )
+    dr = dream.add_parser("run")
+    dr.set_defaults(func=cmd_dream_run)
+    dl = dream.add_parser("list")
+    dl.set_defaults(func=cmd_dream_list)
+    ds = dream.add_parser("show")
+    ds.add_argument("id")
+    ds.set_defaults(func=cmd_dream_show)
+    da = dream.add_parser("approve")
+    da.add_argument("id")
+    da.set_defaults(func=cmd_dream_approve)
+    drej = dream.add_parser("reject")
+    drej.add_argument("id")
+    drej.add_argument("reason")
+    drej.set_defaults(func=cmd_dream_reject)
 
     crit = sub.add_parser("critic", help="inspect / review / dismiss critic findings").add_subparsers(
         dest="crit_cmd"

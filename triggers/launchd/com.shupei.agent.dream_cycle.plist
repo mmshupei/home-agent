@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- M11.1 dream cycle. Runs at 3:30am — after the 3:00am night_cycle so
+         we're reasoning over fresh consolidation outputs. Filesystem sandbox
+         in M11.1; container in M11.2. -->
+    <key>Label</key>
+    <string>com.shupei.agent.dream_cycle</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/uv</string>
+        <string>run</string>
+        <string>agent</string>
+        <string>dream</string>
+        <string>run</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/smo/repos/home-agent</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/smo</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/smo/repos/home-agent/data/runs/dream_cycle.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/smo/repos/home-agent/data/runs/dream_cycle.err</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

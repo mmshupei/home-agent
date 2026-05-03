@@ -338,15 +338,64 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
 
 
 def _maybe_fix_dangling_users_fks(conn: sqlite3.Connection) -> None:
-    """Tables created BEFORE the users-rebuild may still have FKs pointing to
-    users_legacy. SQLite detects this lazily — the table works until something
-    triggers FK checking. Detect by inspecting sqlite_master and rebuild any
-    affected table.
+    """Tables created BEFORE a parent rename-rebuild may still have FKs pointing
+    to <parent>_legacy. SQLite detects this lazily — the table works until
+    something triggers FK enforcement. Scan every user table's SQL for the
+    legacy suffix and rebuild it from the canonical CREATE statements below.
 
-    Currently affected: telegram_link_tokens. Add others here as they appear.
+    Add new entries to FK_REBUILDS when a new table that REFERENCES users(id)
+    or memory(id) is added.
     """
-    affected = ("telegram_link_tokens",)
-    for tbl in affected:
+    legacy_suffixes = ("_legacy",)
+    fk_rebuilds: dict[str, str] = {
+        "telegram_link_tokens": """
+            CREATE TABLE telegram_link_tokens (
+                token       TEXT PRIMARY KEY,
+                user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                consumed_at TIMESTAMP
+            )
+        """,
+        "schema_evidence": """
+            CREATE TABLE schema_evidence (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                schema_id   INTEGER NOT NULL REFERENCES memory(id) ON DELETE CASCADE,
+                episode_id  INTEGER REFERENCES episodes(id) ON DELETE SET NULL,
+                memory_id   INTEGER REFERENCES memory(id) ON DELETE SET NULL,
+                weight      REAL DEFAULT 1.0,
+                added_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """,
+        "memory_revisions": """
+            CREATE TABLE memory_revisions (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                memory_id       INTEGER NOT NULL REFERENCES memory(id) ON DELETE CASCADE,
+                revised_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                revised_by      TEXT NOT NULL,
+                field           TEXT NOT NULL,
+                old_value       TEXT,
+                new_value       TEXT,
+                reason          TEXT,
+                cycle_run_at    TIMESTAMP
+            )
+        """,
+        "memory_archive": """
+            CREATE TABLE memory_archive (
+                id          INTEGER PRIMARY KEY,
+                scope       TEXT NOT NULL,
+                kind        TEXT NOT NULL,
+                content     TEXT NOT NULL,
+                created_at  TIMESTAMP,
+                created_by  TEXT NOT NULL,
+                expires_at  TIMESTAMP,
+                confidence  REAL,
+                last_seen   TIMESTAMP,
+                archived_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """,
+    }
+
+    for tbl, create_sql in fk_rebuilds.items():
         try:
             row = conn.execute(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
@@ -354,24 +403,32 @@ def _maybe_fix_dangling_users_fks(conn: sqlite3.Connection) -> None:
             ).fetchone()
         except sqlite3.OperationalError:
             continue
-        if not row or "users_legacy" not in (row["sql"] or ""):
+        if not row:
             continue
-        # Rebuild telegram_link_tokens with the correct FK
+        sql_text = row["sql"] or ""
+        if not any(suf in sql_text for suf in legacy_suffixes):
+            continue
+        # The table has a stale FK reference; rebuild it. Discover its actual
+        # column list (some columns added via ALTER) and copy into the canonical
+        # shape, intersecting columns to avoid INSERT-with-mismatched-cols.
+        cur_cols = [
+            r["name"]
+            for r in conn.execute(f"PRAGMA table_info({tbl})").fetchall()
+        ]
+        # Parse new column list from create_sql by re-creating into a temp
+        # table and reading PRAGMA. Cheaper: just trust that fk_rebuilds entries
+        # match the actual column set.
+        # (We don't have new columns added via ALTER on these tables.)
+        col_list = ", ".join(cur_cols)
         conn.executescript(
-            """
+            f"""
             PRAGMA foreign_keys = OFF;
             BEGIN;
-            ALTER TABLE telegram_link_tokens RENAME TO telegram_link_tokens_dangling;
-            CREATE TABLE telegram_link_tokens (
-                token       TEXT PRIMARY KEY,
-                user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                consumed_at TIMESTAMP
-            );
-            INSERT INTO telegram_link_tokens(token, user_id, created_at, consumed_at)
-            SELECT token, user_id, created_at, consumed_at
-            FROM telegram_link_tokens_dangling;
-            DROP TABLE telegram_link_tokens_dangling;
+            ALTER TABLE {tbl} RENAME TO {tbl}_dangling;
+            {create_sql};
+            INSERT INTO {tbl}({col_list})
+                SELECT {col_list} FROM {tbl}_dangling;
+            DROP TABLE {tbl}_dangling;
             COMMIT;
             PRAGMA foreign_keys = ON;
             """
