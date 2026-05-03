@@ -134,6 +134,20 @@ CREATE TABLE IF NOT EXISTS events (
     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_events_time ON events(starts_at);
+
+-- M6: post-hoc critic findings
+CREATE TABLE IF NOT EXISTS critic_findings (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    severity    TEXT NOT NULL CHECK (severity IN ('info','warn','error')),
+    category    TEXT NOT NULL,           -- e.g. 'redundancy','scope_leak','fabrication','tool_misuse','context_ignored'
+    detail      TEXT NOT NULL,
+    surfaced_at TIMESTAMP,                -- null until shown to a user
+    dismissed_at TIMESTAMP,
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_critic_unseen
+    ON critic_findings(severity, surfaced_at) WHERE surfaced_at IS NULL;
 """
 
 # Vector table is a virtual table; only created if sqlite-vec loaded. Embedding

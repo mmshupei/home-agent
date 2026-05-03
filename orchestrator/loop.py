@@ -22,6 +22,7 @@ from claude_agent_sdk import (
     create_sdk_mcp_server,
 )
 
+from . import critic
 from .auth import Principal
 from .gating import build_gate_hook, get_profile
 from .memory import retrieve_context
@@ -59,8 +60,9 @@ def compose_prompt(domains: list[str], principal: Principal, task: str) -> str:
     )
 
     context_block = retrieve_context(task, principal)
+    cautions = critic.render_cautions_block()
 
-    parts = [base, identity, context_block, *domain_blocks]
+    parts = [base, identity, cautions, context_block, *domain_blocks]
     return "\n\n".join(p.strip() for p in parts if p.strip())
 
 
@@ -148,5 +150,9 @@ async def run(
         session.finalize(
             final_message=final_text, token_count=token_count, cost_usd=cost_usd
         )
+        # Schedule the post-hoc critic. Fire-and-forget: in a short-lived CLI
+        # process the loop closes before completion (skipped). In long-lived
+        # contexts (HTTP server, REPL) it runs to completion in the background.
+        critic.schedule(session)
 
     return final_text or "(no response)"

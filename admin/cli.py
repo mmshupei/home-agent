@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
 
-from orchestrator import auth, loop
+from orchestrator import auth, critic, loop
 from orchestrator import memory as mem
 from orchestrator.db import connect, ensure_schema, has_vec
 
@@ -112,6 +112,61 @@ def cmd_token_revoke(args: argparse.Namespace) -> int:
     with connect() as conn:
         n = auth.revoke(conn, args.prefix)
     console.print(f"revoked {n} token(s)")
+    return 0
+
+
+def cmd_critic_recent(args: argparse.Namespace) -> int:
+    with connect() as conn:
+        rows = conn.execute(
+            """SELECT cf.id, cf.severity, cf.category, cf.detail,
+                      cf.surfaced_at, cf.dismissed_at, cf.created_at,
+                      s.principal, s.task
+               FROM critic_findings cf
+               JOIN sessions s ON s.id = cf.session_id
+               ORDER BY cf.created_at DESC LIMIT ?""",
+            (args.limit,),
+        ).fetchall()
+    if not rows:
+        console.print("[dim](no critic findings yet)[/dim]")
+        return 0
+    table = Table(title=f"critic findings (last {args.limit})")
+    for col in ("id", "sev", "cat", "principal", "task", "detail", "state"):
+        table.add_column(col)
+    for r in rows:
+        state = (
+            "dismissed" if r["dismissed_at"]
+            else ("surfaced" if r["surfaced_at"] else "unseen")
+        )
+        sev_color = {"info": "cyan", "warn": "yellow", "error": "red"}.get(r["severity"], "white")
+        table.add_row(
+            str(r["id"]),
+            f"[{sev_color}]{r['severity']}[/{sev_color}]",
+            r["category"], r["principal"],
+            (r["task"][:40] + "…") if len(r["task"]) > 40 else r["task"],
+            (r["detail"][:80] + "…") if len(r["detail"]) > 80 else r["detail"],
+            state,
+        )
+    console.print(table)
+    return 0
+
+
+def cmd_critic_review(args: argparse.Namespace) -> int:
+    """Run the critic synchronously against a specific session_id."""
+    findings = asyncio.run(critic.review(args.session_id))
+    console.print(f"critic produced {len(findings)} finding(s) for {args.session_id}")
+    for f in findings:
+        console.print(f"  - [{f.severity}] {f.category}: {f.detail}")
+    return 0
+
+
+def cmd_critic_dismiss(args: argparse.Namespace) -> int:
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE critic_findings SET dismissed_at = CURRENT_TIMESTAMP "
+            "WHERE id = ? AND dismissed_at IS NULL",
+            (args.id,),
+        )
+    console.print(f"dismissed {cur.rowcount} finding(s)")
     return 0
 
 
@@ -310,6 +365,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     mr = memg.add_parser("reindex", help="re-embed all active memories with current model")
     mr.set_defaults(func=cmd_memory_reindex)
+
+    crit = sub.add_parser("critic", help="inspect / review / dismiss critic findings").add_subparsers(
+        dest="crit_cmd"
+    )
+    cr = crit.add_parser("recent")
+    cr.add_argument("--limit", type=int, default=20)
+    cr.set_defaults(func=cmd_critic_recent)
+
+    cv = crit.add_parser("review", help="run the critic against a specific session_id")
+    cv.add_argument("session_id")
+    cv.set_defaults(func=cmd_critic_review)
+
+    cd = crit.add_parser("dismiss")
+    cd.add_argument("id", type=int)
+    cd.set_defaults(func=cmd_critic_dismiss)
 
     return p
 
