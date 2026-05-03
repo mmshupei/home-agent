@@ -52,6 +52,48 @@ uv run agent token list
 uv run agent token revoke <hash-prefix>
 ```
 
+## iOS Shortcut — "Ask Agent" (M5)
+
+Each family member installs this Shortcut on their iPhone (Action Button or Back Tap):
+
+1. **Ask for input** — type: Text, prompt: "Ask the agent…"
+2. **Get Contents of URL** —
+   - URL: `http://<your-mac-tailnet-name>.ts.net:8765/run`
+   - Method: `POST`
+   - Headers:
+     - `X-Agent-Token`: `agent_<their_token>` (paste their personal token)
+     - `Content-Type`: `application/json`
+   - Request Body (JSON):
+     - `task`: (Provided Input from step 1)
+     - `profile_hint`: `mobile`
+3. **Get Dictionary Value** — key: `response`
+4. **Show Result** — (Dictionary Value from step 3)
+
+Token storage: paste it inside the Shortcut itself (Comment block above the URL action).
+Don't share Shortcuts containing tokens.
+
+For approvals (L2/L3 actions) the agent will push to Pushover instead of replying
+inline. Approve on the iPhone; the Shortcut returns the result once the action
+completes.
+
+A second optional Shortcut "Tell Family" can `POST /memory/family` directly for
+quick fact-saves like "cleaners coming Thursday" — bypasses the agent loop.
+
+### Pushover (per-family-member)
+
+Get a [Pushover](https://pushover.net) account ($5 one-time). Each person installs
+the Pushover iOS app and gets a User Key (visible on the dashboard). Then in
+`.env`:
+
+```
+PUSHOVER_APP_TOKEN=<from your Pushover application>
+PUSHOVER_USER_KEY_SHUPEI=<Shupei's user key>
+PUSHOVER_USER_KEY_YUNYAN=<Yunyan's user key>
+```
+
+When unset for a given user, the gate **denies** L2/L3 mobile-profile calls
+rather than silently allowing them.
+
 ## Notes
 
 - **Encryption at rest** (SQLCipher + Keychain) is staged for M3, when real

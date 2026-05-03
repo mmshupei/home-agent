@@ -1,4 +1,4 @@
-"""Approval prompts: terminal (rich) and Pushover (M2 stub).
+"""Approval prompts: terminal (rich) and Pushover (real, M5).
 
 Profiles select which to call; the gate stays IO-agnostic.
 """
@@ -13,6 +13,7 @@ from rich.panel import Panel
 from rich.prompt import Confirm
 from rich.syntax import Syntax
 
+from . import pushover
 from .auth import Principal
 
 _console = Console(file=sys.stderr)
@@ -64,17 +65,55 @@ async def prompt_terminal(tool_input: dict, tier: int, principal: Principal) -> 
     return await asyncio.to_thread(ask)
 
 
-async def prompt_pushover_stub(
+def _pushover_summary(tool_input: dict) -> str:
+    """One-line human description for the Pushover body."""
+    name = tool_input.get("tool_name", "?")
+    args = tool_input.get("tool_input", {})
+    bits = []
+    if isinstance(args, dict):
+        for k, v in list(args.items())[:4]:
+            s = str(v)
+            if len(s) > 80:
+                s = s[:77] + "…"
+            bits.append(f"{k}={s}")
+    return f"{name}\n" + "\n".join(bits) if bits else name
+
+
+async def prompt_pushover(
     tool_input: dict, tier: int, principal: Principal
 ) -> bool:
-    """M2 stub: log to console and approve. M5 replaces with real Pushover.
+    """Send a Pushover emergency push to the principal's device, wait 60s for
+    ack. Default deny on timeout, error, or unconfigured-pushover.
 
-    Returning True here would silently allow remote-profile calls; that's
-    explicitly noted in the design (M2 just exercises the wiring). M5 swaps
-    in the real implementation with a 60s wait + default deny.
+    Configuration check: PUSHOVER_APP_TOKEN + PUSHOVER_USER_KEY_<UID>. When
+    either is missing we deny and log — no silent allow on remote profiles.
     """
+    if not pushover.is_configured(principal.user_id):
+        _console.print(
+            f"[red](pushover) not configured for {principal.user_id} "
+            f"(set PUSHOVER_APP_TOKEN + PUSHOVER_USER_KEY_{principal.user_id.upper()}). "
+            f"Denying L{tier} {tool_input.get('tool_name')!r}.[/red]"
+        )
+        return False
+
+    body = _pushover_summary(tool_input)
     _console.print(
-        f"[dim](pushover stub) would prompt {principal.name} for "
-        f"L{tier} {tool_input.get('tool_name')!r} → auto-approving for M2[/dim]"
+        f"[yellow](pushover) emergency push to {principal.name} for "
+        f"L{tier} {tool_input.get('tool_name')!r} — waiting up to 60s...[/yellow]"
     )
-    return True
+    ok = await pushover.send_emergency_and_wait(
+        user_id=principal.user_id,
+        title=f"Agent — approve L{tier}?",
+        message=body,
+        wait_seconds=60,
+        retry=30,
+    )
+    _console.print(
+        f"[{'green' if ok else 'red'}](pushover) "
+        f"{'APPROVED' if ok else 'DENIED (timeout/no-ack/error)'}[/]"
+    )
+    return ok
+
+
+# Back-compat alias so the M2 wiring keeps working.
+prompt_pushover_stub = prompt_pushover

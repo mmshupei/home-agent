@@ -122,6 +122,12 @@ def cmd_user_add(args: argparse.Namespace) -> int:
             (args.id, args.name, args.role, args.imessage),
         )
     console.print(f"created user: {args.id} ({args.role})")
+    if args.pushover_user_key:
+        console.print(
+            f"\n[yellow]reminder:[/yellow] add this to .env:\n"
+            f"  PUSHOVER_USER_KEY_{args.id.upper()}={args.pushover_user_key}\n"
+            f"(stored in env, not the DB, so secrets stay out of agent.db)"
+        )
     return 0
 
 
@@ -274,6 +280,12 @@ def build_parser() -> argparse.ArgumentParser:
     ua.add_argument("--name", required=True)
     ua.add_argument("--role", required=True, choices=["admin", "adult", "child"])
     ua.add_argument("--imessage", help="iMessage handle (phone/email), optional")
+    ua.add_argument(
+        "--pushover-user-key",
+        dest="pushover_user_key",
+        help="If provided, the CLI prints the .env line you should add. "
+             "The key itself is NOT written to the DB.",
+    )
     ua.set_defaults(func=cmd_user_add)
 
     ul = usr.add_parser("list")
