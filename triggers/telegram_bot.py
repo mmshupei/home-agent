@@ -304,6 +304,34 @@ async def _surface_pending_dream_proposal(
 _surfaced_dream_props: dict[int, set[str]] = {}
 
 
+def _quoted_context(update: Update) -> str:
+    """If the user used Telegram's 'reply to' on a previous message, render
+    the quoted text + a hint so the agent knows what's being responded to.
+
+    Telegram includes the full original message in `reply_to_message` —
+    text, sender (was it the bot or another user), date. We surface text
+    only; the bot/human distinction is implicit (this is a 1:1 chat with
+    the bot today).
+    """
+    rt = update.message.reply_to_message
+    if not rt:
+        return ""
+    quoted = (rt.text or rt.caption or "").strip()
+    if not quoted:
+        return ""
+    # Trim long quoted blocks; keep the most relevant slice.
+    if len(quoted) > 600:
+        quoted = quoted[:600] + "…"
+    sender = "you (the agent, earlier)" if rt.from_user and rt.from_user.is_bot else "a previous message"
+    return (
+        f"## The user is replying to {sender}:\n"
+        f"> {quoted}\n\n"
+        f"Their reply follows. Treat it as a response to that quoted text — "
+        f"if it's an approval/rejection of something you proposed, act on it; "
+        f"if it's a clarification of an earlier topic, fold it in."
+    )
+
+
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tg_user = update.effective_user
     text = (update.message.text or "").strip()
@@ -325,11 +353,18 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     except Exception as e:
         print(f"[surface] error (non-fatal): {e}")
 
-    print(f"[in ] {principal.name} (tg={tg_user.username or tg_user.id}): {text[:80]!r}")
+    quoted = _quoted_context(update)
+    if quoted:
+        print(f"[in ] {principal.name} (tg={tg_user.username or tg_user.id}) [REPLY-TO]: {text[:80]!r}")
+    else:
+        print(f"[in ] {principal.name} (tg={tg_user.username or tg_user.id}): {text[:80]!r}")
+
     _record_thread(tg_user.id, "them", text)
 
     thread = _thread_context(tg_user.id)
-    task = (thread + "\n\n" + text) if thread else text
+    # Order: thread context (broad) → quoted (narrow, specific) → the message.
+    parts = [p for p in (thread, quoted) if p]
+    task = ("\n\n".join(parts) + "\n\n" + text) if parts else text
 
     # Run loop.run() with a parallel "warm" coroutine that keeps the typing
     # indicator alive and drops a "still working" nudge after 30s.
