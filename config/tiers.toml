@@ -1,0 +1,54 @@
+# tiers.toml — tool-name regex → tier classification.
+# A tool's tier is fixed; the profile decides enforcement (see profiles.toml).
+# Order matters: first match wins. Unknown tools default to L2 (conservative).
+
+[[rule]]
+pattern = "^(filesystem__read|fetch|search|.*__get_|.*__list_|.*__search_)"
+tier    = 1
+[[rule]]
+pattern = "^playwright__(navigate|screenshot|extract|read_)"
+tier    = 1
+[[rule]]
+pattern = "^ha__(get_state|list_)"
+tier    = 1
+[[rule]]
+pattern = "^memory__read"
+tier    = 1
+
+[[rule]]
+pattern = "^applescript__reminders__(add|complete|update)"
+tier    = 2
+[[rule]]
+pattern = "^applescript__calendar__add"
+tier    = 2
+[[rule]]
+pattern = "^ha__call_service__(light|switch|scene|media_player)"
+tier    = 2
+[[rule]]
+pattern = "^playwright__(click|fill|select)"
+tier    = 2
+[[rule]]
+pattern = "^filesystem__write"
+tier    = 2
+[[rule]]
+pattern = "^memory__write"
+tier    = 2
+
+[[rule]]
+pattern = "^ha__call_service__(lock|cover|alarm|garage)"
+tier    = 3
+[[rule]]
+pattern = "^applescript__messages__send"
+tier    = 3
+[[rule]]
+pattern = "^applescript__mail__send"
+tier    = 3
+[[rule]]
+pattern = "^finance__(place_order|transfer|sell)"
+tier    = 3
+[[rule]]
+pattern = "^playwright__(submit|confirm|purchase|pay)"
+tier    = 3
+[[rule]]
+pattern = "^memory__delete"
+tier    = 3

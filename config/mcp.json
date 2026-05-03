@@ -1,0 +1,4 @@
+{
+  "_comment": "MCP server registry. Loaded by orchestrator/loop.py and merged with in-process SDK MCP servers. Profiles select a subset via the 'mcp' field on the profile (added in M2+). M1 leaves this empty so the SDK uses no external MCP servers; Playwright + Filesystem land in M4.",
+  "servers": {}
+}

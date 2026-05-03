@@ -1,0 +1,23 @@
+# roles.toml — capability matrix per role. The gate enforces max_tier as a
+# hard ceiling regardless of profile policy.
+
+[admin]
+default_profile      = "interactive"
+allowed_profiles     = ["interactive", "home", "mobile", "unattended"]
+max_tier             = 3
+can_promote_memory   = true
+can_read_all_scopes  = true
+
+[adult]
+default_profile      = "mobile"
+allowed_profiles     = ["interactive", "home", "mobile"]
+max_tier             = 3
+can_promote_memory   = true
+can_read_all_scopes  = false
+
+[child]
+default_profile      = "mobile"
+allowed_profiles     = ["mobile"]
+max_tier             = 1
+can_promote_memory   = false
+can_read_all_scopes  = false

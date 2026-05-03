@@ -1,0 +1,31 @@
+# profiles.toml — how each invocation context enforces tiers.
+# Tiers themselves are defined in tiers.toml; profiles only choose enforcement.
+# Policy values: "allow" | "prompt_cli" | "prompt_push" | "deny"
+
+[unattended]
+description = "launchd-scheduled jobs (morning brief, prune)"
+policy.1 = "allow"
+policy.2 = "deny"
+policy.3 = "deny"
+domains  = ["chores", "finance"]
+
+[interactive]
+description = "Terminal CLI at the host Mac"
+policy.1 = "allow"
+policy.2 = "prompt_cli"
+policy.3 = "prompt_cli"
+domains  = ["home", "finance", "chores", "browse"]
+
+[home]
+description = "Hammerspoon hotkey at desk"
+policy.1 = "allow"
+policy.2 = "allow"
+policy.3 = "prompt_cli"
+domains  = ["home", "chores", "browse"]
+
+[mobile]
+description = "iOS Shortcuts / iMessage / Tailscale"
+policy.1 = "allow"
+policy.2 = "prompt_push"
+policy.3 = "prompt_push"
+domains  = ["home", "chores", "browse"]

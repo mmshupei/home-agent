@@ -1,0 +1,15 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+data/agent.db
+data/agent.db-journal
+data/agent.db-wal
+data/agent.db-shm
+data/runs/
+.pytest_cache/
+.ruff_cache/
+.DS_Store

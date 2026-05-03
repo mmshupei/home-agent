@@ -1,0 +1,41 @@
+[project]
+name = "home-agent"
+version = "0.1.0"
+description = "Family agent: per-person identity, scoped memory, tiered tool gating."
+requires-python = ">=3.12"
+dependencies = [
+    "claude-agent-sdk>=0.1.72",
+    "anthropic>=0.40",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "pydantic>=2.6",
+    "tomli-w>=1.0",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+    "rich>=13.7",
+    # Staged for later milestones, kept here so `uv sync` provisions once:
+    # M3 (memory):  "sqlite-vec>=0.1"
+    # M3 (at-rest): "sqlcipher3-binary>=0.5", "keyring>=24"
+]
+
+[project.optional-dependencies]
+memory = ["sqlite-vec>=0.1"]
+encrypted = ["sqlcipher3-binary>=0.5", "keyring>=24"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.5"]
+
+[project.scripts]
+agent = "admin.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["orchestrator", "admin", "triggers", "tools"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
