@@ -52,6 +52,57 @@ uv run agent token list
 uv run agent token revoke <hash-prefix>
 ```
 
+## iMessage relay (M8)
+
+Family members text the Mac like any other contact; the agent receives via
+`~/Library/Messages/chat.db`, processes through the orchestrator (mobile
+profile, with thread context), and replies through Messages.app.
+
+### One-time setup
+
+1. **Register each family member's handle**
+   ```bash
+   uv run agent user add --id yunyan --name Yunyan --role adult \
+        --imessage "+15551234567"
+   ```
+   Phone numbers can be E.164 (+1...) or just the last 10 digits — the
+   relay normalizes both.
+
+2. **Grant Full Disk Access** to the binary that will run the relay.
+   System Settings → Privacy & Security → Full Disk Access → toggle on:
+   - `/opt/homebrew/bin/uv`     (the runtime)
+   - `/usr/sbin/sshd-keygen-wrapper` (only if you'll relay from launchd)
+
+   Without this, the relay errors immediately (`authorization denied` on
+   chat.db).
+
+3. **(Optional) Grant Automation permission** for Messages.app: System
+   Settings → Privacy & Security → Automation → uv → check Messages. The
+   first send will prompt for it interactively — accept.
+
+### Run
+
+Foreground (for testing):
+```bash
+uv run python -m triggers.imessage_relay --dry-run        # log inbound, no reply
+uv run python -m triggers.imessage_relay                  # live
+```
+
+As a launchd daemon (auto-restart, runs at login):
+```bash
+uv run python -m admin.launchd install   # picks up the imessage_relay.plist too
+```
+
+### Behavior
+
+- Only known handles are processed (silent ignore for unknowns)
+- Last 4 exchanges in the past 30 minutes are passed as thread context
+- Replies are clipped to 1500 chars
+- L2/L3 actions trigger the mobile-profile Pushover prompt — no inline allow
+- State (`data/imessage_relay.state`) records the last processed ROWID; on
+  first run with no state, jumps to current MAX(ROWID) so the backlog isn't
+  reprocessed
+
 ## launchd schedules (M7)
 
 Three jobs ship in `triggers/launchd/`:
