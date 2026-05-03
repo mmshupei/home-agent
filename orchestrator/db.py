@@ -235,6 +235,24 @@ CREATE TABLE IF NOT EXISTS night_cycles (
 );
 CREATE INDEX IF NOT EXISTS idx_night_cycles_ran ON night_cycles(ran_at);
 
+-- Ren's mutable capability surface. A skill is a named, persistent prompt
+-- Ren writes for themselves so they can recall a procedure later instead of
+-- re-deriving it. Invocation = the agent reads the prompt from the tool
+-- result and executes through normal tools (gate fires per constituent).
+CREATE TABLE IF NOT EXISTS skills (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL UNIQUE,    -- short identifier, e.g. 'evening_brief'
+    description     TEXT NOT NULL,           -- one-line summary for skill__list
+    prompt          TEXT NOT NULL,           -- the actual instructions Ren follows on invoke
+    created_by      TEXT NOT NULL,           -- principal.user_id who created it (or 'ren')
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_invoked    TIMESTAMP,
+    invoke_count    INTEGER DEFAULT 0,
+    enabled         INTEGER DEFAULT 1,       -- soft-delete via enabled=0
+    notes           TEXT                     -- optional history / why-it-exists
+);
+CREATE INDEX IF NOT EXISTS idx_skills_enabled ON skills(enabled, name);
+
 -- M9-adjacent: cross-process L3 approval queue. Agent process INSERTs
 -- a pending row; Telegram bot UPDATEs to approved/denied via inline button
 -- callback. Gate polls the row for state change. See orchestrator/approvals.py.

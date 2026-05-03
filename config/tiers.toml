@@ -35,6 +35,18 @@ tier    = 3
 pattern = "^finance__(get_|list_)"
 tier    = 1
 
+# Ren's mutable skill registry. invoke is L1 (returns text; constituent
+# tool calls fire the gate normally). delete is L3 (capability removal).
+[[rule]]
+pattern = "^skill__(list|describe|invoke)$"
+tier    = 1
+[[rule]]
+pattern = "^skill__(register|update)$"
+tier    = 2
+[[rule]]
+pattern = "^skill__delete$"
+tier    = 3
+
 # Reachy curated tools (M10). All L2: reversible (a story can stop, quiet
 # mode can be lifted), nothing irreversible reaches Reachy by design.
 [[rule]]
