@@ -95,24 +95,44 @@ def _new_messages(conn, since_rowid: int) -> list[dict]:
 
 
 def _resolve_principal(handle: str) -> Optional[auth.Principal]:
-    """Look up the user whose imessage_handle matches this phone/email. We
-    normalize phone numbers loosely (last 10 digits) since iMessage stores
-    in E.164 (+1...) but users may register without."""
+    """Look up the user whose imessage_handle matches this phone/email.
+
+    A user may register multiple handles by storing them comma-separated
+    (e.g. "+16692827917,mshupei@gmail.com") since iMessage routes inbound
+    to whichever handle the sender used. We split and check each.
+
+    Phone normalization: iMessage stores in E.164 ('+1...') but the same
+    person may register without the country code, so we also match on the
+    last 10 digits.
+    """
     norm = "".join(c for c in handle if c.isdigit())
-    last10 = norm[-10:] if len(norm) >= 10 else handle
+    last10 = norm[-10:] if len(norm) >= 10 else None
+
     with connect() as c:
-        r = c.execute(
-            """SELECT id, name, role, imessage_handle
-               FROM users
-               WHERE imessage_handle = ?
-                  OR imessage_handle LIKE ?
-                  OR ? LIKE '%' || imessage_handle""",
-            (handle, f"%{last10}", handle),
-        ).fetchone()
-    if not r:
-        return None
+        rows = c.execute(
+            "SELECT id, name, role, imessage_handle FROM users "
+            "WHERE imessage_handle IS NOT NULL AND imessage_handle != ''"
+        ).fetchall()
+
+    for r in rows:
+        for raw in (r["imessage_handle"] or "").split(","):
+            stored = raw.strip()
+            if not stored:
+                continue
+            if stored == handle:
+                return _make_principal(r)
+            stored_digits = "".join(c for c in stored if c.isdigit())
+            if last10 and len(stored_digits) >= 10 and stored_digits[-10:] == last10:
+                return _make_principal(r)
+            # email vs lowercase email
+            if "@" in stored and stored.lower() == handle.lower():
+                return _make_principal(r)
+    return None
+
+
+def _make_principal(row) -> auth.Principal:
     return auth.Principal(
-        user_id=r["id"], name=r["name"], role=r["role"], token_label="imessage"
+        user_id=row["id"], name=row["name"], role=row["role"], token_label="imessage"
     )
 
 
