@@ -10,6 +10,8 @@ data/agent.db-journal
 data/agent.db-wal
 data/agent.db-shm
 data/runs/
+data/*.state
+data/finance.json
 .pytest_cache/
 .ruff_cache/
 .DS_Store
