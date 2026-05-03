@@ -27,7 +27,11 @@ from .gating import build_gate_hook, get_profile
 from .memory import retrieve_context
 from .prompts import prompt_pushover_stub, prompt_terminal
 from .session import Session
+from tools.sdk_mcp.applescript_tools import applescript_tools
+from tools.sdk_mcp.finance_tools import finance_tools
+from tools.sdk_mcp.ha_tools import ha_tools
 from tools.sdk_mcp.memory_tools import build_memory_tools
+from tools.sdk_mcp.routines import routines
 from tools.sdk_mcp.test_tools import test_tools
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -80,11 +84,17 @@ async def run(
         prompt_push=prompt_pushover_stub,
     )
 
-    # Per-principal memory tools so the gate's scope rules apply correctly.
+    # In-process MCP servers. Per-principal binding for memory; the rest are
+    # stateless. Tools whose backends aren't configured (e.g. HA absent) report
+    # an error from inside the tool so the agent can surface it cleanly.
     memory_server = create_sdk_mcp_server(
         "memory", "0.1.0", tools=build_memory_tools(principal)
     )
     test_server = create_sdk_mcp_server("agent_test", "0.1.0", tools=test_tools())
+    apple_server = create_sdk_mcp_server("apple", "0.1.0", tools=applescript_tools())
+    finance_server = create_sdk_mcp_server("finance", "0.1.0", tools=finance_tools())
+    ha_server = create_sdk_mcp_server("ha", "0.1.0", tools=ha_tools())
+    routines_server = create_sdk_mcp_server("routines", "0.1.0", tools=routines())
 
     # Auth: subscription (claude /login) by default; set AGENT_USE_SUBSCRIPTION=0
     # to fall back to the API key in the parent shell env.
@@ -96,7 +106,14 @@ async def run(
     options = ClaudeAgentOptions(
         model=model,
         system_prompt=compose_prompt(domains, principal, task),
-        mcp_servers={"agent_test": test_server, "memory": memory_server},
+        mcp_servers={
+            "agent_test": test_server,
+            "memory": memory_server,
+            "apple": apple_server,
+            "finance": finance_server,
+            "ha": ha_server,
+            "routines": routines_server,
+        },
         permission_mode="default",
         cwd=str(REPO_ROOT),
         env=sdk_env,

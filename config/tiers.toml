@@ -3,7 +3,9 @@
 # Order matters: first match wins. Unknown tools default to L2 (conservative).
 
 [[rule]]
-pattern = "^(filesystem__read|fetch|search|.*__get_|.*__list_|.*__search_)"
+# L1 read-style: bare verbs, plus *__get / *__list / *__search (with or without
+# trailing underscore-suffix like `_state`, `_states`, `_files`).
+pattern = "^(filesystem__read|fetch|search|.*__get(_|$)|.*__list(_|$)|.*__search(_|$))"
 tier    = 1
 [[rule]]
 pattern = "^playwright__(navigate|screenshot|extract|read_)"
@@ -13,6 +15,19 @@ pattern = "^ha__(get_state|list_)"
 tier    = 1
 [[rule]]
 pattern = "^memory__read"
+tier    = 1
+
+# Curated routines: rated at the tier of their highest sub-action.
+[[rule]]
+pattern = "^morning_brief$"
+tier    = 1
+[[rule]]
+pattern = "^(good_night|leaving_home)$"
+tier    = 3
+
+# Finance read-only tools (M4).
+[[rule]]
+pattern = "^finance__(get_|list_)"
 tier    = 1
 
 [[rule]]
