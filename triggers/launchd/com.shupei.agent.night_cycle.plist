@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- M9 night cycle. Runs at 3:00am Pacific. The household must be awake
+         (or pmset-scheduled) for it to fire; see README §M9 for guidance. -->
+    <key>Label</key>
+    <string>com.shupei.agent.night_cycle</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/uv</string>
+        <string>run</string>
+        <string>agent</string>
+        <string>night-cycle</string>
+        <string>run</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/smo/repos/home-agent</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/smo</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/smo/repos/home-agent/data/runs/night_cycle.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/smo/repos/home-agent/data/runs/night_cycle.err</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

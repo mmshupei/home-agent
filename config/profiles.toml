@@ -23,9 +23,24 @@ policy.2 = "allow"
 policy.3 = "prompt_cli"
 domains  = ["home", "chores", "browse"]
 
-[mobile]
-description = "iOS Shortcuts / iMessage / Tailscale"
+# M10: Reachy and similar embodied devices. Real-time interactions can't
+# survive approval prompts mid-utterance, so L2 is auto-allowed; L3 is
+# hard-denied (the device role's max_tier=2 enforces this anyway, double
+# locked here for clarity).
+[embedded]
+description = "Reachy Mini / embodied device interactions"
 policy.1 = "allow"
-policy.2 = "prompt_push"
+policy.2 = "allow"
+policy.3 = "deny"
+domains  = ["storytelling", "child_interaction", "chores"]
+
+[mobile]
+description = "iOS Shortcuts / iMessage / Telegram / Tailscale"
+policy.1 = "allow"
+# L2 reversible side-effects auto-allowed so Telegram conversations don't
+# stall on prompts — matches the REPL's `home` profile. L3 still requires
+# explicit confirmation (Pushover when configured; deny otherwise — safest
+# default for irreversible actions issued from a phone).
+policy.2 = "allow"
 policy.3 = "prompt_push"
 domains  = ["home", "chores", "browse"]

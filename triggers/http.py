@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from orchestrator import auth, loop
+from orchestrator import auth, episodes, loop
 from orchestrator.db import connect, ensure_schema
 
 
@@ -39,6 +39,57 @@ class RunResponse(BaseModel):
 
 @app.get("/health")
 async def health() -> dict:
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# M10 — episode endpoints (Reachy and other embedded sources call these)
+# ---------------------------------------------------------------------------
+
+
+class EpisodeStartRequest(BaseModel):
+    source: str                          # 'reachy' | 'imessage' | 'http' | ...
+    participants: list[str] | None = None
+
+
+class EpisodeEndRequest(BaseModel):
+    episode_id: int
+    transcript: str
+    summary: str | None = None
+    affect: dict | None = None
+    audio_path: str | None = None
+
+
+@app.post("/episode/start")
+async def episode_start(
+    req: EpisodeStartRequest,
+    x_agent_token: str = Header(..., alias="X-Agent-Token"),
+):
+    with connect() as conn:
+        principal = auth.verify(x_agent_token, conn)
+    if not principal:
+        raise HTTPException(401, "invalid token")
+    ep_id = episodes.start(
+        source=req.source, principal=principal,
+        participants=req.participants or [principal.user_id],
+    )
+    return {"episode_id": ep_id}
+
+
+@app.post("/episode/end")
+async def episode_end(
+    req: EpisodeEndRequest,
+    x_agent_token: str = Header(..., alias="X-Agent-Token"),
+):
+    with connect() as conn:
+        principal = auth.verify(x_agent_token, conn)
+    if not principal:
+        raise HTTPException(401, "invalid token")
+    episodes.close(
+        req.episode_id,
+        transcript=req.transcript, summary=req.summary,
+        affect=req.affect, audio_path=req.audio_path,
+    )
     return {"ok": True}
 
 

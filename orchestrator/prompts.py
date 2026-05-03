@@ -13,7 +13,7 @@ from rich.panel import Panel
 from rich.prompt import Confirm
 from rich.syntax import Syntax
 
-from . import pushover
+from . import approvals, pushover
 from .auth import Principal
 
 _console = Console(file=sys.stderr)
@@ -79,41 +79,59 @@ def _pushover_summary(tool_input: dict) -> str:
     return f"{name}\n" + "\n".join(bits) if bits else name
 
 
-async def prompt_pushover(
+async def prompt_telegram(
     tool_input: dict, tier: int, principal: Principal
 ) -> bool:
-    """Send a Pushover emergency push to the principal's device, wait 60s for
-    ack. Default deny on timeout, error, or unconfigured-pushover.
-
-    Configuration check: PUSHOVER_APP_TOKEN + PUSHOVER_USER_KEY_<UID>. When
-    either is missing we deny and log — no silent allow on remote profiles.
+    """Default L3 approval path. Asks the principal via their linked Telegram
+    chat with inline Approve/Deny buttons. Default deny on:
+      - principal has no linked Telegram account
+      - bot token unset
+      - 60s timeout with no button press
+      - send error
     """
-    if not pushover.is_configured(principal.user_id):
+    has_tg = approvals.telegram_user_id_for(principal.user_id) is not None
+    if not has_tg:
         _console.print(
-            f"[red](pushover) not configured for {principal.user_id} "
-            f"(set PUSHOVER_APP_TOKEN + PUSHOVER_USER_KEY_{principal.user_id.upper()}). "
-            f"Denying L{tier} {tool_input.get('tool_name')!r}.[/red]"
+            f"[red](telegram) {principal.user_id!r} has no linked Telegram chat. "
+            f"Denying L{tier} {tool_input.get('tool_name')!r}.\n"
+            f"  Run: agent user link-telegram --user {principal.user_id}[/red]"
         )
         return False
 
-    body = _pushover_summary(tool_input)
+    summary = _pushover_summary(tool_input)
     _console.print(
-        f"[yellow](pushover) emergency push to {principal.name} for "
+        f"[yellow](telegram) prompting {principal.name} for "
         f"L{tier} {tool_input.get('tool_name')!r} — waiting up to 60s...[/yellow]"
     )
-    ok = await pushover.send_emergency_and_wait(
-        user_id=principal.user_id,
-        title=f"Agent — approve L{tier}?",
-        message=body,
-        wait_seconds=60,
-        retry=30,
+    ok = await approvals.request_telegram(
+        principal=principal, tier=tier, tool_input=tool_input,
+        summary=summary, wait_seconds=60,
     )
     _console.print(
-        f"[{'green' if ok else 'red'}](pushover) "
+        f"[{'green' if ok else 'red'}](telegram) "
         f"{'APPROVED' if ok else 'DENIED (timeout/no-ack/error)'}[/]"
     )
     return ok
 
 
-# Back-compat alias so the M2 wiring keeps working.
-prompt_pushover_stub = prompt_pushover
+async def prompt_pushover(
+    tool_input: dict, tier: int, principal: Principal
+) -> bool:
+    """Legacy Pushover path, kept for users who configured it before Telegram
+    became the primary push surface. Same return contract as prompt_telegram."""
+    if not pushover.is_configured(principal.user_id):
+        _console.print(
+            f"[red](pushover) not configured for {principal.user_id}; denying L{tier}[/red]"
+        )
+        return False
+    body = _pushover_summary(tool_input)
+    ok = await pushover.send_emergency_and_wait(
+        user_id=principal.user_id, title=f"Agent — approve L{tier}?",
+        message=body, wait_seconds=60, retry=30,
+    )
+    return ok
+
+
+# Back-compat alias so older wiring (loop.py) keeps working — points to the
+# new Telegram path now that we've consolidated.
+prompt_pushover_stub = prompt_telegram

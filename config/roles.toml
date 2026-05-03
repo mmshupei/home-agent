@@ -21,3 +21,12 @@ allowed_profiles     = ["mobile"]
 max_tier             = 1
 can_promote_memory   = false
 can_read_all_scopes  = false
+
+# M10: device principals (Reachy Mini and similar). Tokens are issued
+# scoped to the user the device is currently serving; never long-lived.
+[device]
+default_profile      = "embedded"
+allowed_profiles     = ["embedded"]
+max_tier             = 2                 # never L3 from a device
+can_promote_memory   = false             # consolidation only
+can_read_all_scopes  = false             # family + system + the user it serves

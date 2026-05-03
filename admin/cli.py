@@ -14,12 +14,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from datetime import datetime
 
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
 
-from orchestrator import auth, critic, loop
+from orchestrator import auth, critic, loop, night_cycle
 from orchestrator import memory as mem
 from orchestrator.db import connect, ensure_schema, has_vec
 
@@ -112,6 +113,49 @@ def cmd_token_revoke(args: argparse.Namespace) -> int:
     with connect() as conn:
         n = auth.revoke(conn, args.prefix)
     console.print(f"revoked {n} token(s)")
+    return 0
+
+
+def cmd_night_cycle_run(args: argparse.Namespace) -> int:
+    res = asyncio.run(night_cycle.run())
+    console.print(
+        f"\n[bold]night cycle #{res.cycle_id}[/bold] status={res.status} "
+        f"duration={res.duration_s}s cost=${res.cost_usd or 0:.4f}\n"
+        f"  episodes={res.episodes_replayed}  schemas+={res.schemas_added}  "
+        f"obs+={res.observations_added}  questions+={res.questions_queued}  "
+        f"archived={res.archived}  decayed={res.decayed}\n\n"
+        f"[dim]reflection:[/dim] {res.notes}"
+    )
+    return 0
+
+
+def cmd_night_cycle_history(args: argparse.Namespace) -> int:
+    with connect() as conn:
+        rows = conn.execute(
+            """SELECT id, ran_at, duration_s, episodes_replayed, schemas_proposed,
+                      observations_added, questions_queued, archived_count,
+                      cost_usd, status, notes
+               FROM night_cycles ORDER BY ran_at DESC LIMIT ?""",
+            (args.limit,),
+        ).fetchall()
+    if not rows:
+        console.print("[dim](no cycles run yet)[/dim]")
+        return 0
+    for r in rows:
+        console.print(
+            f"[cyan]#{r['id']}[/cyan] {r['ran_at']} ({r['duration_s']}s, "
+            f"${r['cost_usd'] or 0:.4f}) status={r['status']}\n"
+            f"  episodes={r['episodes_replayed']} schemas={r['schemas_proposed']} "
+            f"obs={r['observations_added']} q+={r['questions_queued']} "
+            f"archived={r['archived_count']}\n"
+            f"  [dim]{(r['notes'] or '')[:300]}[/dim]\n"
+        )
+    return 0
+
+
+def cmd_memory_revert_cycle(args: argparse.Namespace) -> int:
+    n = mem.revert_cycle(args.cycle_run_at)
+    console.print(f"reverted {n} memory revision(s) from cycle ran at {args.cycle_run_at}")
     return 0
 
 
@@ -414,6 +458,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     mr = memg.add_parser("reindex", help="re-embed all active memories with current model")
     mr.set_defaults(func=cmd_memory_reindex)
+
+    mrev = memg.add_parser("revert-cycle", help="undo all night-cycle revisions from a given run timestamp")
+    mrev.add_argument(
+        "cycle_run_at",
+        type=lambda s: datetime.fromisoformat(s.replace("Z", "+00:00")),
+        help="ISO 8601 timestamp from `night-cycle history`",
+    )
+    mrev.set_defaults(func=cmd_memory_revert_cycle)
+
+    nc = sub.add_parser("night-cycle", help="run / inspect the M9 consolidation pass").add_subparsers(
+        dest="nc_cmd"
+    )
+    ncr = nc.add_parser("run")
+    ncr.set_defaults(func=cmd_night_cycle_run)
+    nch = nc.add_parser("history")
+    nch.add_argument("--limit", type=int, default=10)
+    nch.set_defaults(func=cmd_night_cycle_history)
 
     crit = sub.add_parser("critic", help="inspect / review / dismiss critic findings").add_subparsers(
         dest="crit_cmd"

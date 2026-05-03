@@ -110,22 +110,143 @@ def write(
             conn.close()
 
 
-def forget(memory_id: int, *, conn: sqlite3.Connection | None = None) -> bool:
-    """Soft-delete: set confidence to 0 and remove from vec index. Audit-logged
-    by the calling tool."""
+def forget(
+    memory_id: int,
+    *,
+    revised_by: str = "memory_tool",
+    reason: str | None = None,
+    cycle_run_at: datetime | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> bool:
+    """Soft-delete: set confidence to 0 and remove from vec index.
+    Logs a memory_revision so revert-cycle can undo it."""
     own = conn is None
     if own:
         conn = connect()
     try:
+        old = conn.execute(
+            "SELECT confidence FROM memory WHERE id = ?", (memory_id,)
+        ).fetchone()
+        if not old:
+            return False
         cur = conn.execute(
             "UPDATE memory SET confidence = 0 WHERE id = ?", (memory_id,)
         )
+        if cur.rowcount > 0:
+            _log_revision(
+                conn, memory_id, revised_by, "archived",
+                old_value=str(old["confidence"]), new_value="0",
+                reason=reason, cycle_run_at=cycle_run_at,
+            )
         if has_vec(conn):
             conn.execute("DELETE FROM memory_vec WHERE rowid = ?", (memory_id,))
         return cur.rowcount > 0
     finally:
         if own:
             conn.close()
+
+
+def update_confidence(
+    memory_id: int,
+    new_confidence: float,
+    *,
+    revised_by: str,
+    reason: str | None = None,
+    cycle_run_at: datetime | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> bool:
+    """Adjust a memory's confidence. Logged. Used by night cycle decay and by
+    M11.1 lower_confidence proposals after approval."""
+    own = conn is None
+    if own:
+        conn = connect()
+    try:
+        old = conn.execute(
+            "SELECT confidence FROM memory WHERE id = ?", (memory_id,)
+        ).fetchone()
+        if not old:
+            return False
+        if abs(float(old["confidence"]) - float(new_confidence)) < 1e-9:
+            return True  # no-op
+        conn.execute(
+            "UPDATE memory SET confidence = ? WHERE id = ?",
+            (new_confidence, memory_id),
+        )
+        _log_revision(
+            conn, memory_id, revised_by, "confidence",
+            old_value=str(old["confidence"]), new_value=str(new_confidence),
+            reason=reason, cycle_run_at=cycle_run_at,
+        )
+        return True
+    finally:
+        if own:
+            conn.close()
+
+
+def _log_revision(
+    conn: sqlite3.Connection,
+    memory_id: int,
+    revised_by: str,
+    field: str,
+    *,
+    old_value: str | None,
+    new_value: str | None,
+    reason: str | None,
+    cycle_run_at: datetime | None,
+) -> None:
+    conn.execute(
+        """INSERT INTO memory_revisions
+           (memory_id, revised_by, field, old_value, new_value, reason, cycle_run_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (memory_id, revised_by, field, old_value, new_value, reason, cycle_run_at),
+    )
+
+
+def revert_cycle(cycle_run_at: datetime) -> int:
+    """Undo every revision a single night cycle made. Returns the count of
+    rows reverted. Operates by replaying old_value back into the memory row."""
+    with connect() as c:
+        revs = c.execute(
+            """SELECT id, memory_id, field, old_value
+               FROM memory_revisions
+               WHERE cycle_run_at = ? AND revised_by = 'night_cycle'
+               ORDER BY id DESC""",
+            (cycle_run_at,),
+        ).fetchall()
+        n = 0
+        for r in revs:
+            field, old = r["field"], r["old_value"]
+            if field == "confidence" or field == "archived":
+                try:
+                    val = float(old) if old is not None else None
+                except (TypeError, ValueError):
+                    continue
+                c.execute(
+                    "UPDATE memory SET confidence = ? WHERE id = ?",
+                    (val, r["memory_id"]),
+                )
+            elif field == "content":
+                c.execute(
+                    "UPDATE memory SET content = ? WHERE id = ?",
+                    (old, r["memory_id"]),
+                )
+            elif field == "scope":
+                c.execute(
+                    "UPDATE memory SET scope = ? WHERE id = ?",
+                    (old, r["memory_id"]),
+                )
+            else:
+                continue
+            n += 1
+        # Mark the original revisions reverted by appending a counter-revision
+        for r in revs:
+            c.execute(
+                """INSERT INTO memory_revisions
+                   (memory_id, revised_by, field, old_value, new_value, reason)
+                   VALUES (?, 'revert', ?, NULL, NULL, ?)""",
+                (r["memory_id"], r["field"], f"reverted revision id={r['id']}"),
+            )
+    return n
 
 
 # ---------------------------------------------------------------------------

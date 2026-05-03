@@ -22,16 +22,17 @@ from claude_agent_sdk import (
     create_sdk_mcp_server,
 )
 
-from . import critic
+from . import critic, episodes, morning_surface
 from .auth import Principal
 from .gating import build_gate_hook, get_profile
 from .memory import retrieve_context
-from .prompts import prompt_pushover_stub, prompt_terminal
+from .prompts import prompt_telegram, prompt_terminal
 from .session import Session
 from tools.sdk_mcp.applescript_tools import applescript_tools
 from tools.sdk_mcp.finance_tools import finance_tools
 from tools.sdk_mcp.ha_tools import ha_tools
 from tools.sdk_mcp.memory_tools import build_memory_tools
+from tools.sdk_mcp.reachy_tools import reachy_tools
 from tools.sdk_mcp.routines import routines
 from tools.sdk_mcp.test_tools import test_tools
 
@@ -61,8 +62,11 @@ def compose_prompt(domains: list[str], principal: Principal, task: str) -> str:
 
     context_block = retrieve_context(task, principal)
     cautions = critic.render_cautions_block()
+    morning = morning_surface.render(principal)
 
-    parts = [base, identity, cautions, context_block, *domain_blocks]
+    # Order matters: identity → morning's pending Q (most actionable) →
+    # critic cautions → memory context → domain stylings.
+    parts = [base, identity, morning, cautions, context_block, *domain_blocks]
     return "\n\n".join(p.strip() for p in parts if p.strip())
 
 
@@ -72,18 +76,32 @@ async def run(
     profile: str = "interactive",
     domains: list[str] | None = None,
     model: str = "claude-opus-4-7",
+    source: str | None = None,
 ) -> str:
-    """Run one agent invocation. Returns the final assistant text."""
+    """Run one agent invocation. Returns the final assistant text.
+
+    `source` tags the resulting episode (M9). Defaults inferred from profile:
+    interactive→cli, mobile→mobile, home→home, unattended→launchd.
+    """
     profile_obj = get_profile(profile)
     domains = domains or profile_obj.domains or DEFAULT_DOMAINS
     session = Session.new(task=task, profile=profile, principal=principal)
+    if source is None:
+        source = {
+            "interactive": "cli", "mobile": "mobile",
+            "home": "home", "unattended": "launchd",
+            "embedded": "reachy",
+        }.get(profile, "cli")
+    episode_id = episodes.start(
+        source=source, principal=principal, session_id=session.id
+    )
 
     gate = build_gate_hook(
         session,
         profile_obj,
         principal,
         prompt_cli=prompt_terminal,
-        prompt_push=prompt_pushover_stub,
+        prompt_push=prompt_telegram,
     )
 
     # In-process MCP servers. Per-principal binding for memory; the rest are
@@ -97,6 +115,7 @@ async def run(
     finance_server = create_sdk_mcp_server("finance", "0.1.0", tools=finance_tools())
     ha_server = create_sdk_mcp_server("ha", "0.1.0", tools=ha_tools())
     routines_server = create_sdk_mcp_server("routines", "0.1.0", tools=routines())
+    reachy_server = create_sdk_mcp_server("reachy", "0.1.0", tools=reachy_tools())
 
     # Auth: subscription (claude /login) by default; set AGENT_USE_SUBSCRIPTION=0
     # to fall back to the API key in the parent shell env.
@@ -115,6 +134,7 @@ async def run(
             "finance": finance_server,
             "ha": ha_server,
             "routines": routines_server,
+            "reachy": reachy_server,
         },
         permission_mode="default",
         cwd=str(REPO_ROOT),
@@ -150,6 +170,22 @@ async def run(
         session.finalize(
             final_message=final_text, token_count=token_count, cost_usd=cost_usd
         )
+        # Close the M9 episode. Transcript = task + final reply (the per-tool
+        # detail lives in the session jsonl; the episode just needs the gist).
+        try:
+            transcript = f"USER: {task}\n\nAGENT: {final_text}"
+            episodes.close(
+                episode_id,
+                transcript=transcript,
+                summary=final_text[:200] if final_text else None,
+                affect={
+                    "cost_usd": cost_usd,
+                    "token_count": token_count,
+                    "profile": profile,
+                },
+            )
+        except Exception:
+            pass  # episode close failures must not break the response path
         # Schedule the post-hoc critic. Fire-and-forget: in a short-lived CLI
         # process the loop closes before completion (skipped). In long-lived
         # contexts (HTTP server, REPL) it runs to completion in the background.

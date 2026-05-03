@@ -35,6 +35,12 @@ tier    = 3
 pattern = "^finance__(get_|list_)"
 tier    = 1
 
+# Reachy curated tools (M10). All L2: reversible (a story can stop, quiet
+# mode can be lifted), nothing irreversible reaches Reachy by design.
+[[rule]]
+pattern = "^reachy__(tell_story|ask_about_day|set_quiet_mode)$"
+tier    = 2
+
 [[rule]]
 pattern = "^applescript__reminders__(add|complete|update)"
 tier    = 2
