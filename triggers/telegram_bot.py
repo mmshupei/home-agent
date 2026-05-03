@@ -26,6 +26,8 @@ import secrets
 import sys
 import time
 from collections import defaultdict, deque
+
+import httpx
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -41,8 +43,9 @@ from telegram.ext import (
     filters,
 )
 
-from orchestrator import approvals, auth, loop
+from orchestrator import approvals, auth, loop, memory as mem
 from orchestrator.db import connect, ensure_schema
+from orchestrator.dream import proposals as dream_proposals
 
 # ---------------------------------------------------------------------------
 # Config
@@ -245,6 +248,62 @@ async def _keep_user_warm(
                 nudged = True
 
 
+async def _surface_pending_dream_proposal(
+    update: Update, principal: auth.Principal
+) -> bool:
+    """If there's a pending dream proposal that hasn't been shown to this
+    user yet, send it as a card with [Approve] [Reject] [Later] buttons.
+    Returns True iff one was surfaced (so the caller can choose to skip
+    the user's actual message this turn — though we proceed anyway, so the
+    return value is informational only)."""
+    if principal.role != "admin":
+        return False
+    pending = dream_proposals.list_pending()
+    if not pending:
+        return False
+    # Only surface ONE per inbound message — don't dump three at once.
+    # Use last_seen-style filter via in-memory: skip ones we've already shown
+    # this session. Persistence across restarts: rely on user actually using
+    # one of the buttons (which removes it from list_pending).
+    for prop in pending:
+        if prop["id"] in _surfaced_dream_props.get(update.effective_user.id, set()):
+            continue
+        _surfaced_dream_props.setdefault(update.effective_user.id, set()).add(prop["id"])
+        body = (
+            f"💭 *Overnight, I noticed something:*\n\n"
+            f"_{prop['title']}_\n\n"
+            f"{prop['rationale']}"
+        )
+        keyboard = {
+            "inline_keyboard": [[
+                {"text": "✅ Yes, do it",  "callback_data": f"dream_approve:{prop['id']}"},
+                {"text": "❌ No",          "callback_data": f"dream_reject:{prop['id']}"},
+                {"text": "🕒 Ask later",   "callback_data": f"dream_later:{prop['id']}"},
+            ]]
+        }
+        token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        if not token:
+            return False
+        async with httpx.AsyncClient(timeout=10) as c:
+            await c.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={
+                    "chat_id": update.effective_chat.id,
+                    "text": body,
+                    "parse_mode": "Markdown",
+                    "reply_markup": keyboard,
+                },
+            )
+        return True
+    return False
+
+
+# In-memory: which dream proposal ids have been surfaced to which tg user
+# during this bot run. Cleared on restart; that's fine — list_pending only
+# returns rows still pending in the DB anyway.
+_surfaced_dream_props: dict[int, set[str]] = {}
+
+
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tg_user = update.effective_user
     text = (update.message.text or "").strip()
@@ -257,6 +316,14 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             "I don't know you yet. Ask the operator for a /start link."
         )
         return
+
+    # Proactively surface ONE pending dream proposal (if any) BEFORE we run
+    # the user's task. They can decide on it asynchronously via the buttons
+    # while the agent works on whatever they actually asked.
+    try:
+        await _surface_pending_dream_proposal(update, principal)
+    except Exception as e:
+        print(f"[surface] error (non-fatal): {e}")
 
     print(f"[in ] {principal.name} (tg={tg_user.username or tg_user.id}): {text[:80]!r}")
     _record_thread(tg_user.id, "them", text)
@@ -291,8 +358,11 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def on_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Inline-button callback for L3 approval prompts. callback_data is
-    'approve:<request_id>' or 'deny:<request_id>'."""
+    """Inline-button callback router. Three flavors:
+      - L3 approval:   'approve:<rid>' / 'deny:<rid>'
+      - Dream proposal: 'dream_approve:<pid>' / 'dream_reject:<pid>' / 'dream_later:<pid>'
+      - (Future) more here. Keep prefixes namespaced.
+    """
     cq = update.callback_query
     if not cq:
         return
@@ -300,41 +370,80 @@ async def on_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if ":" not in data:
         await cq.answer("invalid callback")
         return
-    decision, _, request_id = data.partition(":")
-    if decision not in ("approve", "deny"):
-        await cq.answer("unknown action")
-        return
-
-    # Verify the request belongs to whichever principal this Telegram user is
-    # bound to — so a tap on someone else's prompt (forwarded screenshot etc.)
-    # can't authorize.
-    state = approvals.fetch_state(request_id)
-    if not state:
-        await cq.answer("request expired or unknown", show_alert=True)
-        return
+    action, _, payload_id = data.partition(":")
 
     tg_principal = principal_for_telegram(update.effective_user.id)
-    if not tg_principal or tg_principal.user_id != state["user_id"]:
-        await cq.answer("not your approval to make", show_alert=True)
+    if not tg_principal:
+        await cq.answer("you're not linked", show_alert=True)
         return
 
-    if state["state"] != "pending":
-        await cq.answer(f"already {state['state']}", show_alert=True)
+    # ----- L3 tool approval -----
+    if action in ("approve", "deny"):
+        state = approvals.fetch_state(payload_id)
+        if not state:
+            await cq.answer("request expired or unknown", show_alert=True)
+            return
+        if tg_principal.user_id != state["user_id"]:
+            await cq.answer("not your approval to make", show_alert=True)
+            return
+        if state["state"] != "pending":
+            await cq.answer(f"already {state['state']}", show_alert=True)
+            return
+        ok = approvals.decide(payload_id, approved=(action == "approve"), via="telegram")
+        if not ok:
+            await cq.answer("race lost", show_alert=True)
+            return
+        label = "✅ Approved" if action == "approve" else "❌ Denied"
+        await cq.edit_message_text(
+            text=f"{label}: `{state['tool_name']}`\n_{state['summary']}_",
+            parse_mode="Markdown",
+        )
+        await cq.answer()
+        print(f"[approval] {payload_id} -> {action} by tg={update.effective_user.id}")
         return
 
-    ok = approvals.decide(request_id, approved=(decision == "approve"), via="telegram")
-    if not ok:
-        await cq.answer("race lost (someone else decided)", show_alert=True)
+    # ----- Dream proposal -----
+    if action in ("dream_approve", "dream_reject", "dream_later"):
+        # Anyone admin-role can decide; for now restrict to the original
+        # 'shupei' admin (multi-admin can come later).
+        if tg_principal.role != "admin":
+            await cq.answer("admin only", show_alert=True)
+            return
+        prop = dream_proposals.get(payload_id)
+        if not prop:
+            await cq.answer("proposal not found", show_alert=True)
+            return
+        if prop["state"] != "pending":
+            await cq.answer(f"already {prop['state']}", show_alert=True)
+            return
+
+        if action == "dream_approve":
+            ok, msg = dream_proposals.approve(
+                payload_id, decided_by=f"telegram:{tg_principal.user_id}"
+            )
+            label = "✅ Applied" if ok else "⚠️ Could not apply"
+            await cq.edit_message_text(
+                text=f"{label}\n_{msg}_", parse_mode="Markdown",
+            )
+        elif action == "dream_reject":
+            dream_proposals.reject(
+                payload_id, decided_by=f"telegram:{tg_principal.user_id}",
+                reason="rejected via telegram (no reason)",
+            )
+            await cq.edit_message_text(
+                text=f"❌ Rejected: _{prop['title']}_", parse_mode="Markdown",
+            )
+        elif action == "dream_later":
+            # Leave as pending; just acknowledge so the user knows we got it.
+            await cq.edit_message_text(
+                text=f"🕒 Will surface again next time: _{prop['title']}_",
+                parse_mode="Markdown",
+            )
+        await cq.answer()
+        print(f"[dream] {payload_id} -> {action} by tg={update.effective_user.id}")
         return
 
-    # Update the message text to reflect the decision; remove the buttons.
-    label = "✅ Approved" if decision == "approve" else "❌ Denied"
-    await cq.edit_message_text(
-        text=f"{label}: `{state['tool_name']}`\n_{state['summary']}_",
-        parse_mode="Markdown",
-    )
-    await cq.answer()
-    print(f"[approval] {request_id} -> {decision} by tg={update.effective_user.id}")
+    await cq.answer(f"unknown action {action!r}", show_alert=True)
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
