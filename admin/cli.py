@@ -285,6 +285,51 @@ def cmd_memory_prune(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_user_link_telegram(args: argparse.Namespace) -> int:
+    """Generate a one-shot link token + clickable t.me URL for binding the
+    user_id to a Telegram chat. Hand the URL to that family member; they tap it,
+    the bot's /start handler binds them. Token expires in 5 minutes."""
+    import os
+    from triggers.telegram_bot import issue_link_token
+
+    bot_user = os.environ.get("TELEGRAM_BOT_USERNAME")
+    if not bot_user:
+        # Try to derive from the bot token via the API
+        bot_user = _derive_bot_username()
+    with connect() as conn:
+        row = conn.execute("SELECT id FROM users WHERE id = ?", (args.user,)).fetchone()
+    if not row:
+        console.print(f"[red]unknown user_id: {args.user}[/red]")
+        return 1
+    token = issue_link_token(args.user)
+    if bot_user:
+        console.print(
+            f"\nSend this link to {args.user}. Tap it on the iPhone with Telegram installed:\n"
+            f"  https://t.me/{bot_user}?start={token}\n\n"
+            f"(expires in 5 minutes)"
+        )
+    else:
+        console.print(
+            f"\nLink token (couldn't derive bot username):\n  {token}\n\n"
+            f"Construct the URL as: https://t.me/<your_bot_username>?start={token}\n"
+            f"Or set TELEGRAM_BOT_USERNAME in .env."
+        )
+    return 0
+
+
+def _derive_bot_username() -> str | None:
+    """Hit Telegram's getMe to discover the bot's username from the token."""
+    import os, httpx
+    tok = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not tok:
+        return None
+    try:
+        r = httpx.get(f"https://api.telegram.org/bot{tok}/getMe", timeout=5)
+        return r.json().get("result", {}).get("username")
+    except Exception:
+        return None
+
+
 def cmd_user_list(args: argparse.Namespace) -> int:
     with connect() as conn:
         rows = conn.execute(
@@ -345,6 +390,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     ul = usr.add_parser("list")
     ul.set_defaults(func=cmd_user_list)
+
+    ult = usr.add_parser("link-telegram", help="generate a one-shot link to bind a user to a Telegram account")
+    ult.add_argument("--user", required=True)
+    ult.set_defaults(func=cmd_user_link_telegram)
 
     memg = sub.add_parser("memory", help="inspect / search / prune memory").add_subparsers(
         dest="mem_cmd"

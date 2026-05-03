@@ -16,6 +16,7 @@ dependencies = [
     # Staged for later milestones, kept here so `uv sync` provisions once:
     # M3 (memory):  "sqlite-vec>=0.1"
     # M3 (at-rest): "sqlcipher3-binary>=0.5", "keyring>=24"
+    "python-telegram-bot>=21.0",
 ]
 
 [project.optional-dependencies]

@@ -53,7 +53,18 @@ CREATE TABLE IF NOT EXISTS users (
     name        TEXT NOT NULL,
     role        TEXT NOT NULL CHECK (role IN ('admin', 'adult', 'child')),
     imessage_handle TEXT,
+    telegram_user_id INTEGER UNIQUE,
+    telegram_username TEXT,
     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- One-shot link tokens for binding a Telegram chat to a user_id.
+-- 5-minute TTL; consumed on first /start <token> call.
+CREATE TABLE IF NOT EXISTS telegram_link_tokens (
+    token       TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    consumed_at TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS tokens (
@@ -160,12 +171,37 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_vec USING vec0(
 """
 
 
+_MIGRATIONS = [
+    # (column_check_table, column, alter_sql) — additive only, idempotent.
+    ("users", "telegram_user_id", "ALTER TABLE users ADD COLUMN telegram_user_id INTEGER"),
+    ("users", "telegram_username", "ALTER TABLE users ADD COLUMN telegram_username TEXT"),
+]
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {
+        r["name"]
+        for r in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    for table, column, alter_sql in _MIGRATIONS:
+        try:
+            cols = _columns(conn, table)
+        except sqlite3.OperationalError:
+            continue  # table missing entirely; SCHEMA below will create it
+        if column not in cols:
+            conn.execute(alter_sql)
+
+
 def ensure_schema(conn: sqlite3.Connection | None = None) -> None:
     own = conn is None
     if own:
         conn = connect()
     try:
         conn.executescript(SCHEMA)
+        _apply_migrations(conn)
         # vec0 needs sqlite-vec loaded; connect(load_vec=True) handles that.
         try:
             conn.executescript(VEC_SCHEMA)

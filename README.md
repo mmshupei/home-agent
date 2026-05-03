@@ -52,6 +52,52 @@ uv run agent token list
 uv run agent token revoke <hash-prefix>
 ```
 
+## Telegram bot (M8b — recommended chat surface)
+
+Family members chat with the agent via Telegram. Each Telegram user is a
+distinct chat with the bot — no same-Apple-ID collision (the iMessage gotcha).
+
+### One-time setup
+
+**1. Create the bot.** On your iPhone or in Telegram desktop:
+- Open Telegram, search for `@BotFather`, tap Start
+- Send `/newbot` → give it a display name (e.g. "Shupei Family Agent") and a
+  username ending in `bot` (e.g. `shupei_family_agent_bot`)
+- BotFather replies with an HTTP API token — copy it
+
+**2. Drop the token in `.env`:**
+```
+TELEGRAM_BOT_TOKEN=<paste here>
+```
+(Optional: also set `TELEGRAM_BOT_USERNAME=shupei_family_agent_bot` to skip the
+auto-detection round-trip.)
+
+**3. Start the bot:**
+```bash
+uv run python -m triggers.telegram_bot
+# or as a launchd daemon:
+uv run python -m admin.launchd install
+```
+
+**4. Link each family member.** Run for each user:
+```bash
+uv run agent user link-telegram --user shupei
+```
+The CLI prints a `https://t.me/<botname>?start=<token>` URL. Tap it on the
+iPhone where Telegram is installed; the bot binds the Telegram account to that
+agent user_id. Token expires in 5 minutes; re-issue if needed.
+
+### Behavior
+
+- Inbound messages route through `loop.run()` under the **mobile profile**, so
+  L2/L3 actions go through Pushover approval — same gate as the iOS Shortcut path
+- "Typing…" indicator while the agent works
+- Last 4 turns within 30 minutes carried as thread context
+- Replies clipped to 4000 chars (Telegram's limit is 4096)
+- Unknown Telegram users get a polite "ask the operator for a link" reply,
+  never silently accepted
+- No Full Disk Access required — Telegram delivers via HTTPS
+
 ## iMessage relay (M8)
 
 Family members text the Mac like any other contact; the agent receives via
