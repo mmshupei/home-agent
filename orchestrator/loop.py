@@ -24,8 +24,10 @@ from claude_agent_sdk import (
 
 from .auth import Principal
 from .gating import build_gate_hook, get_profile
+from .memory import retrieve_context
 from .prompts import prompt_pushover_stub, prompt_terminal
 from .session import Session
+from tools.sdk_mcp.memory_tools import build_memory_tools
 from tools.sdk_mcp.test_tools import test_tools
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -39,7 +41,7 @@ def _read(p: Path) -> str:
     return p.read_text(encoding="utf-8") if p.exists() else ""
 
 
-def compose_prompt(domains: list[str], principal: Principal) -> str:
+def compose_prompt(domains: list[str], principal: Principal, task: str) -> str:
     base = _read(PROMPTS_DIR / "base.md")
     domain_blocks = [_read(PROMPTS_DIR / "domains" / f"{d}.md") for d in domains]
     now = datetime.now(PACIFIC).strftime("%A, %Y-%m-%d %H:%M %Z")
@@ -52,13 +54,10 @@ def compose_prompt(domains: list[str], principal: Principal) -> str:
         f"Current time: {now}.\n"
     )
 
-    parts = [base, identity, *domain_blocks]
+    context_block = retrieve_context(task, principal)
+
+    parts = [base, identity, context_block, *domain_blocks]
     return "\n\n".join(p.strip() for p in parts if p.strip())
-
-
-# Single in-process MCP server providing test tools at each tier.
-# In M4 this gets joined by real applescript / HA / playwright servers.
-_TEST_SERVER = create_sdk_mcp_server("agent_test", "0.1.0", tools=test_tools())
 
 
 async def run(
@@ -81,13 +80,26 @@ async def run(
         prompt_push=prompt_pushover_stub,
     )
 
+    # Per-principal memory tools so the gate's scope rules apply correctly.
+    memory_server = create_sdk_mcp_server(
+        "memory", "0.1.0", tools=build_memory_tools(principal)
+    )
+    test_server = create_sdk_mcp_server("agent_test", "0.1.0", tools=test_tools())
+
+    # Auth: subscription (claude /login) by default; set AGENT_USE_SUBSCRIPTION=0
+    # to fall back to the API key in the parent shell env.
+    use_sub = os.environ.get("AGENT_USE_SUBSCRIPTION", "1") != "0"
+    sdk_env = {"ANTHROPIC_API_KEY": ""} if use_sub else {
+        "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY", "")
+    }
+
     options = ClaudeAgentOptions(
         model=model,
-        system_prompt=compose_prompt(domains, principal),
-        mcp_servers={"agent_test": _TEST_SERVER},
+        system_prompt=compose_prompt(domains, principal, task),
+        mcp_servers={"agent_test": test_server, "memory": memory_server},
         permission_mode="default",
         cwd=str(REPO_ROOT),
-        env={"ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY", "")},
+        env=sdk_env,
         hooks={
             "PreToolUse": [HookMatcher(hooks=[gate])],
         },

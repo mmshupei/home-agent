@@ -19,7 +19,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-memory = ["sqlite-vec>=0.1"]
+memory = [
+    "sentence-transformers>=3.0",
+    "sqlite-vec>=0.1",
+]
 encrypted = ["sqlcipher3-binary>=0.5", "keyring>=24"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.5"]
 
