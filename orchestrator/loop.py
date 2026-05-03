@@ -1,26 +1,32 @@
 """Orchestrator entrypoint.
 
-M1: minimal. SDK client + composed system prompt. No memory, no gating, no
-critic. Those land in M2 / M3 / M6.
+M2: PreToolUse gating wired in via HookMatcher. permission_mode is now
+'default' so the gate is the source of truth. No memory yet (M3), no critic
+(M6), no real MCP servers beyond the in-process test SDK MCP (M4 brings the
+real ones).
 """
 from __future__ import annotations
 
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 from zoneinfo import ZoneInfo
 
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    HookMatcher,
     ResultMessage,
     TextBlock,
+    create_sdk_mcp_server,
 )
 
 from .auth import Principal
+from .gating import build_gate_hook, get_profile
+from .prompts import prompt_pushover_stub, prompt_terminal
 from .session import Session
+from tools.sdk_mcp.test_tools import test_tools
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = REPO_ROOT / "config" / "prompts"
@@ -50,6 +56,11 @@ def compose_prompt(domains: list[str], principal: Principal) -> str:
     return "\n\n".join(p.strip() for p in parts if p.strip())
 
 
+# Single in-process MCP server providing test tools at each tier.
+# In M4 this gets joined by real applescript / HA / playwright servers.
+_TEST_SERVER = create_sdk_mcp_server("agent_test", "0.1.0", tools=test_tools())
+
+
 async def run(
     task: str,
     principal: Principal,
@@ -58,18 +69,28 @@ async def run(
     model: str = "claude-opus-4-7",
 ) -> str:
     """Run one agent invocation. Returns the final assistant text."""
-    domains = domains or DEFAULT_DOMAINS
+    profile_obj = get_profile(profile)
+    domains = domains or profile_obj.domains or DEFAULT_DOMAINS
     session = Session.new(task=task, profile=profile, principal=principal)
+
+    gate = build_gate_hook(
+        session,
+        profile_obj,
+        principal,
+        prompt_cli=prompt_terminal,
+        prompt_push=prompt_pushover_stub,
+    )
 
     options = ClaudeAgentOptions(
         model=model,
         system_prompt=compose_prompt(domains, principal),
-        # M1: no MCP servers, no hooks, no allowed_tools restriction. The SDK's
-        # default Claude-Code tool preset is used so basic file/web operations
-        # work out of the box.
-        permission_mode="bypassPermissions",
+        mcp_servers={"agent_test": _TEST_SERVER},
+        permission_mode="default",
         cwd=str(REPO_ROOT),
         env={"ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY", "")},
+        hooks={
+            "PreToolUse": [HookMatcher(hooks=[gate])],
+        },
     )
 
     final_text = ""
@@ -93,7 +114,6 @@ async def run(
                             usage.get("output_tokens") or 0
                         ) or None
                     if getattr(msg, "result", None):
-                        # Prefer the SDK's final result string when present.
                         final_text = msg.result
     finally:
         session.finalize(
