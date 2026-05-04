@@ -21,11 +21,16 @@ Auth chain:
 from __future__ import annotations
 
 import asyncio
+import importlib
+import json
 import os
 import secrets
+import subprocess
 import sys
 import time
 from collections import defaultdict, deque
+from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
 from typing import Optional
@@ -43,9 +48,12 @@ from telegram.ext import (
     filters,
 )
 
-from orchestrator import approvals, auth, loop, memory as mem, threads
+from orchestrator import approvals, auth, loop, memory as mem, resident as residents, threads
 from orchestrator.db import connect, ensure_schema
 from orchestrator.dream import proposals as dream_proposals
+from orchestrator.scheduler.heartbeat import Heartbeat
+from tools.sdk_mcp import scheduler_tools as scheduler_tool_registry
+from triggers import telegram_format
 
 # ---------------------------------------------------------------------------
 # Config
@@ -55,6 +63,57 @@ LINK_TOKEN_TTL_SEC = 5 * 60  # 5 minutes
 REPLY_MAX_CHARS = 4000  # Telegram limit is 4096
 THREAD_TURNS = 4
 THREAD_WINDOW_MIN = 30
+
+
+# ---------------------------------------------------------------------------
+# Outbound formatter: hot-reloadable leaf module
+# ---------------------------------------------------------------------------
+# `triggers/telegram_format.py` is a pure-function module — no held state, no
+# I/O. That makes it safe to reload in-place when its file changes on disk,
+# without restarting the bot. This is the pilot for self-modification of
+# leaf surfaces; anything that owns long-lived objects still needs a process
+# restart (see bead REN-76t for the launchd + staged-patch story).
+_FORMATTER_PATH = Path(telegram_format.__file__)
+_FORMATTER_MTIME: float = 0.0
+
+
+def _formatter():
+    """Return the telegram_format module, hot-reloading if its file changed."""
+    global _FORMATTER_MTIME, telegram_format
+    try:
+        mtime = _FORMATTER_PATH.stat().st_mtime
+    except OSError:
+        return telegram_format
+    if _FORMATTER_MTIME and mtime > _FORMATTER_MTIME:
+        try:
+            telegram_format = importlib.reload(telegram_format)
+            print(f"[telegram_format] hot-reloaded (mtime={mtime})")
+        except Exception as e:
+            # Reload failed — keep the previous good module in scope.
+            print(f"[telegram_format] reload failed, staying on previous: {e!r}")
+    _FORMATTER_MTIME = mtime
+    return telegram_format
+
+
+async def _reply_html(message, raw: str) -> None:
+    """Render `raw` as Telegram HTML and send it; on parse-mode error, fall
+    back to plain text so the user always gets the message."""
+    try:
+        rendered = _formatter().render(raw)
+    except Exception as e:
+        print(f"[telegram_format] render failed: {e!r}; sending raw")
+        await message.reply_text(raw)
+        return
+    try:
+        await message.reply_text(rendered, parse_mode="HTML")
+    except Exception as e:
+        # Telegram rejected the HTML (unmatched tag, suspicious entity, ...).
+        # Retry as plain text so the reply still lands.
+        print(f"[telegram] HTML send failed: {e!r}; retrying raw")
+        try:
+            await message.reply_text(raw)
+        except Exception as e2:
+            print(f"[telegram] raw fallback also failed: {e2!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -484,29 +543,45 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     parts = [p for p in (thread, quoted, thread_meta) if p]
     task = ("\n\n".join(parts) + "\n\n" + text) if parts else text
 
-    # Run loop.run() with a parallel "warm" coroutine that keeps the typing
-    # indicator alive and drops a "still working" nudge after 30s.
+    # Submit through the resident agent for this principal. The resident
+    # owns a long-lived ClaudeSDKClient; if the user sends another message
+    # while we're streaming, the resident will interrupt and fold the new
+    # text in as a steer (returning None for the superseded submission, so
+    # we don't double-reply). See orchestrator/resident.py for the model.
+    try:
+        agent = await residents.get_resident(
+            principal=principal, surface="telegram",
+            profile="mobile", model="claude-opus-4-7",
+        )
+    except Exception as e:
+        print(f"[resident] start error: {e!r}")
+        await update.message.reply_text(f"(agent error: {type(e).__name__}: {e})")
+        return
+
     task_done = asyncio.Event()
     warm_task = asyncio.create_task(
         _keep_user_warm(update.effective_chat.id, update.message, task_done)
     )
     try:
         try:
-            reply = await loop.run(
-                task=task, principal=principal, profile="mobile",
-                model="claude-opus-4-7",
-            )
+            reply = await agent.submit(task)
         except Exception as e:
             reply = f"(agent error: {type(e).__name__}: {e})"
     finally:
         task_done.set()
         await warm_task  # let it exit cleanly
 
+    if reply is None:
+        # Steering interrupt: a later message in this same window owns the
+        # reply. Stay quiet so we don't double-send.
+        print(f"[out] -> tg={tg_user.username or tg_user.id}: (steered, no reply sent)")
+        return
+
     if reply and len(reply) > REPLY_MAX_CHARS:
         reply = reply[: REPLY_MAX_CHARS - 1] + "…"
 
     _record_thread(tg_user.id, "us", reply)
-    await update.message.reply_text(reply or "(no response)")
+    await _reply_html(update.message, reply or "(no response)")
     print(f"[out] -> tg={tg_user.username or tg_user.id}: {reply[:80]!r}")
 
 
@@ -639,6 +714,305 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Startup self-check + drift detection
+# ---------------------------------------------------------------------------
+# After a restart (planned `launchctl kickstart -k`, KeepAlive crash recovery,
+# host reboot), the post_init hook reads the previous shutdown snapshot, runs
+# a health check, computes drift, and posts a one-line greeting to each
+# linked admin so silence-after-restart isn't, well, silent.
+#
+# Trade-offs intentionally NOT covered here:
+#   - Pre-restart countdown: would need a wrapper around launchctl kickstart.
+#     Deferred — the restart sender (the user, or a future script) can add
+#     that themselves.
+#   - MCP server health probe: MCP servers spawn per agent invocation, not as
+#     long-lived processes. The first user message after a restart is the
+#     true MCP smoke test; nothing useful to probe at startup.
+
+_SHUTDOWN_SNAPSHOT_PATH = Path(__file__).resolve().parent.parent / "data" / "last_shutdown.json"
+
+# Scheduler heartbeat — initialized in _announce_startup, stopped in _record_shutdown.
+_HEARTBEAT: Optional[Heartbeat] = None
+
+
+async def _scheduler_push_to_owner(owner_user_id: str, text: str) -> None:
+    """Out-of-band notification path used by the scheduler subagent.
+    Looks up the owner's telegram_user_id and sends via the bot directly —
+    bypassing the resident agent so the message never enters the user's
+    active conversation thread."""
+    global _APPLICATION_REF
+    app = _APPLICATION_REF
+    if app is None:
+        print(f"[scheduler] no app reference; dropping notify to {owner_user_id}")
+        return
+    with connect() as c:
+        r = c.execute(
+            "SELECT telegram_user_id FROM users WHERE id = ?", (owner_user_id,)
+        ).fetchone()
+    if not r or not r["telegram_user_id"]:
+        print(
+            f"[scheduler] no telegram binding for {owner_user_id}; dropping notify"
+        )
+        return
+    chat_id = int(r["telegram_user_id"])
+    try:
+        await app.bot.send_message(chat_id=chat_id, text=text)
+        print(f"[scheduler] notified {owner_user_id} (chat={chat_id}): {text[:80]!r}")
+    except Exception as e:
+        print(f"[scheduler] could not notify {owner_user_id}: {e!r}")
+
+
+# Module-level reference set in _announce_startup so the notify bridge can
+# reach the live Application without threading it through every callback.
+_APPLICATION_REF: Optional[Application] = None
+
+
+def _linked_admins() -> list[tuple[str, int]]:
+    """(user_id, telegram_chat_id) for admin users with a Telegram binding.
+    In a 1:1 chat with a bot, chat_id == user_id, so the tg_user_id column
+    doubles as the chat_id we send to."""
+    with connect() as c:
+        rows = c.execute(
+            "SELECT id, telegram_user_id FROM users "
+            "WHERE role='admin' AND telegram_user_id IS NOT NULL"
+        ).fetchall()
+    return [(r["id"], int(r["telegram_user_id"])) for r in rows]
+
+
+def _bd_ready_summary() -> tuple[int, list[str]]:
+    """Return (open_count, top_3_titles). (-1, []) on any error so callers
+    can flag without crashing startup."""
+    try:
+        cp = subprocess.run(
+            ["bd", "ready", "--json"],
+            capture_output=True, text=True, timeout=5,
+            cwd=str(Path(__file__).resolve().parent.parent),
+        )
+        if cp.returncode != 0:
+            return -1, []
+        items = json.loads(cp.stdout) or []
+        if not isinstance(items, list):
+            return -1, []
+        titles = [(it.get("title") or "")[:80] for it in items[:3]]
+        return len(items), titles
+    except Exception:
+        return -1, []
+
+
+def _gather_state_snapshot() -> dict:
+    """Capture state worth comparing across a restart. Used by the shutdown
+    writer; the startup reader gathers a 'now' snapshot via the same function
+    and diffs the two."""
+    snap: dict = {
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # Open threads, per linked admin (currently only telegram surface, but
+    # the structure is forward-compat for imessage etc).
+    open_threads: list[dict] = []
+    try:
+        for user_id, _ in _linked_admins():
+            t = threads.get_open("telegram", user_id)
+            if t:
+                open_threads.append({
+                    "id": t.id, "surface": t.surface, "principal": t.principal,
+                    "turn_count": t.turn_count,
+                    "started_at": t.started_at, "last_active": t.last_active,
+                    "last_turn_preview": (t.last_turn_text or "")[:80],
+                })
+    except Exception as e:
+        print(f"[snapshot] threads error (non-fatal): {e}")
+    snap["open_threads"] = open_threads
+
+    # Beads
+    bd_count, bd_titles = _bd_ready_summary()
+    snap["bd_open_count"] = bd_count
+    snap["bd_top_titles"] = bd_titles
+
+    # Memory: max id is a cheap monotonic drift detector.
+    try:
+        with connect() as c:
+            r = c.execute("SELECT MAX(id) AS m FROM memory").fetchone()
+        snap["max_memory_id"] = int(r["m"] or 0)
+    except Exception as e:
+        print(f"[snapshot] memory query error: {e}")
+        snap["max_memory_id"] = -1
+
+    return snap
+
+
+def _read_shutdown_snapshot() -> Optional[dict]:
+    try:
+        with _SHUTDOWN_SNAPSHOT_PATH.open() as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        print(f"[startup] could not read shutdown snapshot: {e}")
+        return None
+
+
+def _write_shutdown_snapshot(snap: dict) -> None:
+    """Atomic write: tmp file + rename, so a crash mid-write doesn't leave
+    a corrupt snapshot for the next startup."""
+    try:
+        _SHUTDOWN_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _SHUTDOWN_SNAPSHOT_PATH.with_suffix(".json.tmp")
+        with tmp.open("w") as f:
+            json.dump(snap, f, indent=2, default=str)
+        tmp.replace(_SHUTDOWN_SNAPSHOT_PATH)
+    except Exception as e:
+        print(f"[shutdown] could not write snapshot: {e}")
+
+
+async def _record_shutdown(app: Application) -> None:
+    """post_shutdown hook: stop scheduler + resident agents cleanly, then
+    persist state for the next startup's drift check. Best-effort; never
+    raise (we're already on the way out)."""
+    global _HEARTBEAT
+    # Stop the heartbeat before residents so any in-flight subagent gets a
+    # chance to wind down on its own ClaudeSDKClient close path.
+    try:
+        if _HEARTBEAT is not None:
+            await _HEARTBEAT.stop()
+    except Exception as e:
+        print(f"[shutdown] heartbeat stop failed: {e}")
+    finally:
+        scheduler_tool_registry.clear_heartbeat()
+        _HEARTBEAT = None
+    # Stop residents next so any in-flight ClaudeSDKClient closes its
+    # subprocess + read-task before the event loop tears down.
+    try:
+        await residents.stop_all()
+    except Exception as e:
+        print(f"[shutdown] resident stop failed: {e}")
+    try:
+        snap = _gather_state_snapshot()
+        snap["shutdown_clean"] = True
+        _write_shutdown_snapshot(snap)
+        print(
+            f"[shutdown] snapshot written: "
+            f"{snap.get('bd_open_count')} bd open, "
+            f"{len(snap.get('open_threads', []))} threads open, "
+            f"max_memory_id={snap.get('max_memory_id')}"
+        )
+    except Exception as e:
+        print(f"[shutdown] snapshot failed: {e}")
+
+
+def _format_startup_status(
+    snap_prev: Optional[dict], snap_now: dict
+) -> tuple[str, list[str], list[str]]:
+    """Return (icon, notes, issues). icon ∈ {🟢, 🟡, 🔴}.
+    🟢 = all checks pass, downtime explained.
+    🟡 = functional but something noteworthy (long downtime, lost thread, ...).
+    🔴 = a check failed (db unreachable, memory regression, ...).
+    """
+    notes: list[str] = []
+    issues: list[str] = []
+
+    # DB reachability
+    if snap_now.get("max_memory_id", -1) < 0:
+        issues.append("db unreachable")
+    else:
+        notes.append("db ok")
+
+    # Beads CLI
+    bd_n = snap_now.get("bd_open_count", -1)
+    if bd_n < 0:
+        issues.append("bd cli failed")
+    else:
+        notes.append(f"bd {bd_n} open")
+
+    # Downtime + cross-restart drift
+    if snap_prev is None:
+        notes.append("first run (no prior snapshot)")
+    else:
+        try:
+            prev_t = datetime.fromisoformat(snap_prev["captured_at"])
+            now_t = datetime.fromisoformat(snap_now["captured_at"])
+            delta = (now_t - prev_t).total_seconds()
+            if delta < 60:
+                notes.append(f"down {int(delta)}s (kickstart-clean)")
+            elif delta < 3600:
+                notes.append(f"down {int(delta // 60)}m")
+            else:
+                notes.append(f"down {delta / 3600:.1f}h")
+        except Exception:
+            notes.append("downtime unknown")
+
+        if not snap_prev.get("shutdown_clean"):
+            issues.append("prior shutdown not clean (crash or hard kill)")
+
+        # Thread drift: any thread that was open before is no longer open?
+        prev_thread_ids = {t["id"] for t in snap_prev.get("open_threads", [])}
+        now_thread_ids = {t["id"] for t in snap_now.get("open_threads", [])}
+        lost = prev_thread_ids - now_thread_ids
+        if lost:
+            issues.append(f"{len(lost)} thread(s) closed across restart")
+
+        # Memory id should never decrease.
+        prev_max = snap_prev.get("max_memory_id", -1)
+        now_max = snap_now.get("max_memory_id", -1)
+        if prev_max > 0 and 0 <= now_max < prev_max:
+            issues.append(f"memory id regressed ({prev_max} → {now_max})")
+
+    if any("unreachable" in i or "regressed" in i or "cli failed" in i for i in issues):
+        icon = "🔴"
+    elif issues:
+        icon = "🟡"
+    else:
+        icon = "🟢"
+
+    return icon, notes, issues
+
+
+async def _announce_startup(app: Application) -> None:
+    """post_init hook: greet each linked admin with a one-line health line +
+    drift summary. Catches and logs every failure so a flaky check never
+    blocks polling startup."""
+    global _APPLICATION_REF, _HEARTBEAT
+    _APPLICATION_REF = app
+
+    # Start the scheduler heartbeat. Survives any exception in the rest of
+    # this hook — schedule firing must not depend on the greeting succeeding.
+    try:
+        _HEARTBEAT = Heartbeat(on_notify=_scheduler_push_to_owner)
+        scheduler_tool_registry.set_heartbeat(_HEARTBEAT)
+        _HEARTBEAT.start()
+    except Exception as e:
+        print(f"[startup] heartbeat failed to start: {e!r}")
+
+    try:
+        snap_prev = _read_shutdown_snapshot()
+        snap_now = _gather_state_snapshot()
+
+        icon, notes, issues = _format_startup_status(snap_prev, snap_now)
+
+        head = f"{icon} Ren back up · " + " · ".join(notes)
+        if issues:
+            head += "\n⚠️ " + " · ".join(issues)
+
+        # Mention any still-open threads so the user (and I) know I'm
+        # continuing, not starting fresh.
+        for t in snap_now.get("open_threads", []):
+            preview = t.get("last_turn_preview") or ""
+            head += (
+                f"\n↳ thread #{t['id']} on {t['surface']} "
+                f"({t['turn_count']} turns) — last: \"{preview}\""
+            )
+
+        for user_id, chat_id in _linked_admins():
+            try:
+                await app.bot.send_message(chat_id=chat_id, text=head)
+                print(f"[startup] greeted {user_id} (chat={chat_id}): {icon}")
+            except Exception as e:
+                print(f"[startup] could not greet {user_id}: {e}")
+    except Exception as e:
+        print(f"[startup] announce failed: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------
 
@@ -650,7 +1024,13 @@ def build_app() -> Application:
             "TELEGRAM_BOT_TOKEN not set. Create a bot via @BotFather, paste the "
             "token into .env, then re-run."
         )
-    app = ApplicationBuilder().token(token).build()
+    app = (
+        ApplicationBuilder()
+        .token(token)
+        .post_init(_announce_startup)
+        .post_shutdown(_record_shutdown)
+        .build()
+    )
     app.add_handler(CommandHandler("start", on_start))
     app.add_handler(CallbackQueryHandler(on_callback_query))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))

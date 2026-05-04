@@ -162,22 +162,35 @@ def build_gate_hook(
 ):
     """Construct an async PreToolUse hook bound to this session/profile/principal.
 
+    `session` may be either a Session instance (one-shot run) or a zero-arg
+    callable returning the *current* Session (resident-process turn). The
+    callable form lets a long-lived client rebind the session per turn
+    without rebuilding the gate.
+
     `prompt_cli` and `prompt_push` are injected so tests (and the unattended
     profile) don't have to touch IO.
     """
     role = get_role(principal.role)
 
+    # Normalize: always end up with a zero-arg session_provider.
+    if callable(session) and not hasattr(session, "log_intent"):
+        session_provider = session
+    else:
+        _bound_session = session
+        session_provider = lambda: _bound_session
+
     async def gate(input_data: dict, tool_use_id, context):
+        s = session_provider()
         tool_name = input_data.get("tool_name", "")
         tool_input = input_data.get("tool_input", {})
         tier = classify(tool_name)
 
         # 1. Hard role ceiling
         if tier > role.max_tier:
-            seq = session.log_intent(
+            seq = s.log_intent(
                 {"tool_name": tool_name, "tool_input": tool_input}, tier
             )
-            session.log_decision(
+            s.log_decision(
                 seq, tool_name, tier, tool_input, "deny", "role_ceiling"
             )
             return _deny(
@@ -186,7 +199,7 @@ def build_gate_hook(
 
         # 2. Profile policy
         action = profile.policy.get(tier, "deny")
-        seq = session.log_intent(
+        seq = s.log_intent(
             {"tool_name": tool_name, "tool_input": tool_input}, tier
         )
 
@@ -213,7 +226,7 @@ def build_gate_hook(
         else:
             decision, decided_by, approved = "deny", "unknown_policy", False
 
-        session.log_decision(seq, tool_name, tier, tool_input, decision, decided_by)
+        s.log_decision(seq, tool_name, tier, tool_input, decision, decided_by)
 
         if approved:
             return _allow()

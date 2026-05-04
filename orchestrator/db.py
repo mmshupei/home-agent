@@ -342,6 +342,37 @@ CREATE TABLE IF NOT EXISTS constitution_rejections (
     layer               TEXT NOT NULL,                -- 'pre_implementer' | 'post_patch' | 'pre_apply'
     occurred_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Scheduler: pulse-driven scheduled actions. A 15-min heartbeat task in
+-- triggers/telegram_bot.py scans this table; rows whose previous cron tick
+-- (or run_once_at) is past AND whose last_fired_at < that previous tick are
+-- handed off to a separate ClaudeSDKClient subagent (orchestrator/scheduler/
+-- runner.py). Subagents post a short notification message to owner_user via
+-- Telegram out-of-band; they do NOT submit into the user's resident.
+--
+-- Naming/shape mirrors `skills` for consistency: name UNIQUE, soft-delete via
+-- enabled=0, created_by recorded honestly, rows survive disable.
+CREATE TABLE IF NOT EXISTS scheduled_actions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL UNIQUE,
+    cron_expr       TEXT,                        -- 5-field cron, evaluated in `timezone`
+    run_once_at     TIMESTAMP,                   -- mutually exclusive with cron_expr
+    target_kind     TEXT NOT NULL CHECK (target_kind IN ('skill','prompt')),
+    target          TEXT NOT NULL,               -- skill name OR free-form prompt text
+    owner_user      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    timezone        TEXT NOT NULL DEFAULT 'America/Los_Angeles',
+    last_fired_at   TIMESTAMP,                   -- NULL = never fired
+    last_status     TEXT,                        -- 'ok' | 'error' | NULL
+    last_error      TEXT,
+    last_cost_usd   REAL,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_by      TEXT NOT NULL,
+    notes           TEXT,
+    CHECK ((cron_expr IS NOT NULL) <> (run_once_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_scheduled_actions_enabled
+    ON scheduled_actions(enabled, name);
 """
 
 # Vector table is a virtual table; only created if sqlite-vec loaded. Embedding

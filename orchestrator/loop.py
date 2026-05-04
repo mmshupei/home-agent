@@ -34,6 +34,7 @@ from tools.sdk_mcp.ha_tools import ha_tools
 from tools.sdk_mcp.memory_tools import build_memory_tools
 from tools.sdk_mcp.reachy_tools import reachy_tools
 from tools.sdk_mcp.routines import routines
+from tools.sdk_mcp.scheduler_tools import build_scheduler_tools
 from tools.sdk_mcp.skill_tools import build_skill_tools
 from tools.sdk_mcp.test_tools import test_tools
 from tools.sdk_mcp.thread_tools import build_thread_tools
@@ -49,19 +50,28 @@ def _read(p: Path) -> str:
     return p.read_text(encoding="utf-8") if p.exists() else ""
 
 
-def compose_prompt(domains: list[str], principal: Principal, task: str) -> str:
-    base = _read(PROMPTS_DIR / "base.md")
-    domain_blocks = [_read(PROMPTS_DIR / "domains" / f"{d}.md") for d in domains]
-    now = datetime.now(PACIFIC).strftime("%A, %Y-%m-%d %H:%M %Z")
-
-    identity = (
+def _identity_block(principal: Principal, *, with_time: bool) -> str:
+    """The 'who am I talking to' block. Time is omitted in the resident's
+    static system prompt so the prompt is stable across turns; it's then
+    re-injected per-turn via compose_per_turn_header()."""
+    head = (
         f"## Current speaker\n"
         f"You are speaking with {principal.name} (user_id={principal.user_id}, "
         f"role={principal.role}). Respect their scope: a {principal.role} user "
-        f"sees system + family memory plus their own user-scoped memory.\n"
-        f"Current time: {now}.\n"
+        f"sees system + family memory plus their own user-scoped memory."
     )
+    if with_time:
+        now = datetime.now(PACIFIC).strftime("%A, %Y-%m-%d %H:%M %Z")
+        return head + f"\nCurrent time: {now}."
+    return head
 
+
+def compose_prompt(domains: list[str], principal: Principal, task: str) -> str:
+    """Full per-invocation system prompt for one-shot run(). Combines the
+    static and dynamic sections in the order Ren is used to seeing them."""
+    base = _read(PROMPTS_DIR / "base.md")
+    domain_blocks = [_read(PROMPTS_DIR / "domains" / f"{d}.md") for d in domains]
+    identity = _identity_block(principal, with_time=True)
     context_block = retrieve_context(task, principal)
     cautions = critic.render_cautions_block()
     morning = morning_surface.render(principal)
@@ -70,6 +80,94 @@ def compose_prompt(domains: list[str], principal: Principal, task: str) -> str:
     # critic cautions → memory context → domain stylings.
     parts = [base, identity, morning, cautions, context_block, *domain_blocks]
     return "\n\n".join(p.strip() for p in parts if p.strip())
+
+
+def compose_static_system_prompt(domains: list[str], principal: Principal) -> str:
+    """Stable system-prompt portion for a long-lived ResidentAgent. Excludes
+    anything that should refresh per turn: current time, morning surface
+    (recomputes each call), and per-task memory retrieval. The dynamic bits
+    are prepended to each user message via compose_per_turn_header()."""
+    base = _read(PROMPTS_DIR / "base.md")
+    domain_blocks = [_read(PROMPTS_DIR / "domains" / f"{d}.md") for d in domains]
+    identity = _identity_block(principal, with_time=False)
+    cautions = critic.render_cautions_block()
+    parts = [base, identity, cautions, *domain_blocks]
+    return "\n\n".join(p.strip() for p in parts if p.strip())
+
+
+def compose_per_turn_header(task: str, principal: Principal) -> str:
+    """Live, per-turn preamble prepended to the user's message in the
+    resident model. Carries the current time, morning-surface pending
+    question (if any), and a fresh memory retrieval scoped to this turn's
+    task. Cheap to recompute; freshness matters more than cache reuse here."""
+    now = datetime.now(PACIFIC).strftime("%A, %Y-%m-%d %H:%M %Z")
+    now_block = f"## Now\n{now}"
+    morning = morning_surface.render(principal)
+    context_block = retrieve_context(task, principal)
+    parts = [now_block, morning, context_block]
+    return "\n\n".join(p.strip() for p in parts if p.strip())
+
+
+def build_options(
+    *,
+    principal: Principal,
+    system_prompt: str,
+    gate,
+    model: str,
+    source: str,
+) -> ClaudeAgentOptions:
+    """Construct ClaudeAgentOptions for either a one-shot run or a resident
+    client. Spins up the in-process MCP servers (per-principal binding for
+    memory/skill/thread; the rest are stateless). Tools whose backends
+    aren't configured (e.g. HA absent) report an error from inside the
+    tool so the agent can surface it cleanly."""
+    memory_server = create_sdk_mcp_server(
+        "memory", "0.1.0", tools=build_memory_tools(principal)
+    )
+    test_server = create_sdk_mcp_server("agent_test", "0.1.0", tools=test_tools())
+    apple_server = create_sdk_mcp_server("apple", "0.1.0", tools=applescript_tools())
+    finance_server = create_sdk_mcp_server("finance", "0.1.0", tools=finance_tools())
+    ha_server = create_sdk_mcp_server("ha", "0.1.0", tools=ha_tools())
+    routines_server = create_sdk_mcp_server("routines", "0.1.0", tools=routines())
+    reachy_server = create_sdk_mcp_server("reachy", "0.1.0", tools=reachy_tools())
+    skill_server = create_sdk_mcp_server("skill", "0.1.0", tools=build_skill_tools(principal))
+    scheduler_server = create_sdk_mcp_server(
+        "scheduler", "0.1.0", tools=build_scheduler_tools(principal),
+    )
+    thread_server = create_sdk_mcp_server(
+        "thread", "0.1.0",
+        tools=build_thread_tools(principal, default_surface=source or "telegram"),
+    )
+
+    # Auth: subscription (claude /login) by default; set AGENT_USE_SUBSCRIPTION=0
+    # to fall back to the API key in the parent shell env.
+    use_sub = os.environ.get("AGENT_USE_SUBSCRIPTION", "1") != "0"
+    sdk_env = {"ANTHROPIC_API_KEY": ""} if use_sub else {
+        "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY", "")
+    }
+
+    return ClaudeAgentOptions(
+        model=model,
+        system_prompt=system_prompt,
+        mcp_servers={
+            "agent_test": test_server,
+            "memory": memory_server,
+            "apple": apple_server,
+            "finance": finance_server,
+            "ha": ha_server,
+            "routines": routines_server,
+            "reachy": reachy_server,
+            "skill": skill_server,
+            "scheduler": scheduler_server,
+            "thread": thread_server,
+        },
+        permission_mode="default",
+        cwd=str(REPO_ROOT),
+        env=sdk_env,
+        hooks={
+            "PreToolUse": [HookMatcher(hooks=[gate])],
+        },
+    )
 
 
 async def run(
@@ -106,51 +204,12 @@ async def run(
         prompt_push=prompt_telegram,
     )
 
-    # In-process MCP servers. Per-principal binding for memory; the rest are
-    # stateless. Tools whose backends aren't configured (e.g. HA absent) report
-    # an error from inside the tool so the agent can surface it cleanly.
-    memory_server = create_sdk_mcp_server(
-        "memory", "0.1.0", tools=build_memory_tools(principal)
-    )
-    test_server = create_sdk_mcp_server("agent_test", "0.1.0", tools=test_tools())
-    apple_server = create_sdk_mcp_server("apple", "0.1.0", tools=applescript_tools())
-    finance_server = create_sdk_mcp_server("finance", "0.1.0", tools=finance_tools())
-    ha_server = create_sdk_mcp_server("ha", "0.1.0", tools=ha_tools())
-    routines_server = create_sdk_mcp_server("routines", "0.1.0", tools=routines())
-    reachy_server = create_sdk_mcp_server("reachy", "0.1.0", tools=reachy_tools())
-    skill_server = create_sdk_mcp_server("skill", "0.1.0", tools=build_skill_tools(principal))
-    thread_server = create_sdk_mcp_server(
-        "thread", "0.1.0",
-        tools=build_thread_tools(principal, default_surface=source or "telegram"),
-    )
-
-    # Auth: subscription (claude /login) by default; set AGENT_USE_SUBSCRIPTION=0
-    # to fall back to the API key in the parent shell env.
-    use_sub = os.environ.get("AGENT_USE_SUBSCRIPTION", "1") != "0"
-    sdk_env = {"ANTHROPIC_API_KEY": ""} if use_sub else {
-        "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY", "")
-    }
-
-    options = ClaudeAgentOptions(
-        model=model,
+    options = build_options(
+        principal=principal,
         system_prompt=compose_prompt(domains, principal, task),
-        mcp_servers={
-            "agent_test": test_server,
-            "memory": memory_server,
-            "apple": apple_server,
-            "finance": finance_server,
-            "ha": ha_server,
-            "routines": routines_server,
-            "reachy": reachy_server,
-            "skill": skill_server,
-            "thread": thread_server,
-        },
-        permission_mode="default",
-        cwd=str(REPO_ROOT),
-        env=sdk_env,
-        hooks={
-            "PreToolUse": [HookMatcher(hooks=[gate])],
-        },
+        gate=gate,
+        model=model,
+        source=source,
     )
 
     final_text = ""

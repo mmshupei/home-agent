@@ -55,6 +55,15 @@ tier    = 2
 pattern = "^skill__delete$"
 tier    = 3
 
+# Scheduler: pulse-driven scheduled actions. list is L1 (read);
+# register/cancel/fire_now are L2 (DB write + potential out-of-band LLM spend).
+[[rule]]
+pattern = "^schedule__list$"
+tier    = 1
+[[rule]]
+pattern = "^schedule__(register|cancel|fire_now)$"
+tier    = 2
+
 # Reachy curated tools (M10). All L2: reversible (a story can stop, quiet
 # mode can be lifted), nothing irreversible reaches Reachy by design.
 [[rule]]

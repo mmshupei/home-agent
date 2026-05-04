@@ -12,6 +12,7 @@ data/agent.db-shm
 data/runs/
 data/*.state
 data/finance.json
+data/last_shutdown.json
 dream-queue/
 # M11 sandboxes live in $HOME, not the repo, but ignore here too just in case
 agents-dream/

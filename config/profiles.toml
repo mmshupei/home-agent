@@ -34,6 +34,13 @@ policy.2 = "allow"
 policy.3 = "deny"
 domains  = ["storytelling", "child_interaction", "chores"]
 
+[scheduled]
+description = "Heartbeat-spawned subagent for a due scheduled action. No human is online to confirm L3, so L3 is hard-denied; L1 + L2 auto-allowed so reversible household actions (lights, scenes, scripts) can complete."
+policy.1 = "allow"
+policy.2 = "allow"
+policy.3 = "deny"
+domains  = ["home", "chores"]
+
 [mobile]
 description = "iOS Shortcuts / iMessage / Telegram / Tailscale"
 policy.1 = "allow"
