@@ -167,6 +167,13 @@ def build_options(
         hooks={
             "PreToolUse": [HookMatcher(hooks=[gate])],
         },
+        # Claude Code interop: load user-level settings (enabled marketplaces,
+        # installed plugins) and expose all discovered skills via the native
+        # `Skill` tool. Coexists with our DB-backed `skill__*` MCP surface —
+        # CC skills are read-only filesystem; ours are Ren's own procedures.
+        # PreToolUse gate still applies to every tool a CC skill might fire.
+        setting_sources=["user"],
+        skills="all",
     )
 
 
