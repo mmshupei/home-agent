@@ -29,7 +29,7 @@ from claude_agent_sdk import (
 
 from .proposals import ProposalDraft
 
-DREAM_MODEL = os.environ.get("AGENT_DREAM_MODEL", "claude-opus-4-7")
+DREAM_MODEL = os.environ.get("AGENT_DREAM_MODEL", "claude-fable-5")
 
 DREAM_SYSTEM_PROMPT = """You are the household agent's nightly dreaming process.
 

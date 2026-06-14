@@ -182,7 +182,7 @@ async def run(
     principal: Principal,
     profile: str = "interactive",
     domains: list[str] | None = None,
-    model: str = "claude-opus-4-7",
+    model: str = "claude-fable-5",
     source: str | None = None,
 ) -> str:
     """Run one agent invocation. Returns the final assistant text.

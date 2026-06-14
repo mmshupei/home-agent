@@ -113,7 +113,7 @@ def compact(
     # Also persist the summary as a memory row so retrieval picks it up.
     from . import memory as mem
     mem.write(
-        content=f"Thread on {open_thread.started_at} ({surface}, {open_thread.turn_count} turns): {summary}",
+        content=f"[Past thread, {open_thread.started_at}, {surface}, {open_thread.turn_count} turns] {summary}",
         scope="family",
         kind="lesson",
         created_by=principal_user_id,

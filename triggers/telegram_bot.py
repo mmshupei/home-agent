@@ -334,11 +334,16 @@ async def _surface_pending_dream_proposal(
             f"{prop['rationale']}"
         )
         keyboard = {
-            "inline_keyboard": [[
-                {"text": "✅ Yes, do it",  "callback_data": f"dream_approve:{prop['id']}"},
-                {"text": "❌ No",          "callback_data": f"dream_reject:{prop['id']}"},
-                {"text": "🕒 Ask later",   "callback_data": f"dream_later:{prop['id']}"},
-            ]]
+            "inline_keyboard": [
+                [
+                    {"text": "✅ Yes, do it", "callback_data": f"dream_approve:{prop['id']}"},
+                    {"text": "❌ No",         "callback_data": f"dream_reject:{prop['id']}"},
+                ],
+                [
+                    {"text": "💬 Explain",    "callback_data": f"dream_ask:{prop['id']}"},
+                    {"text": "🕒 Ask later",  "callback_data": f"dream_later:{prop['id']}"},
+                ],
+            ]
         }
         token = os.environ.get("TELEGRAM_BOT_TOKEN")
         if not token:
@@ -480,6 +485,60 @@ def _quoted_context(update: Update) -> str:
     )
 
 
+async def on_dreams(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Surface the full pending dream-proposal queue on demand.
+
+    Replaces the per-message proactive pop (removed 2026-06-02). Renders the
+    full queue as a single card with batch action buttons, so a backlog of N
+    proposals takes one tap to clear instead of N inbound messages.
+    """
+    tg_user = update.effective_user
+    principal = principal_for_telegram(tg_user.id)
+    if not principal or principal.role != "admin":
+        await update.message.reply_text("admin only")
+        return
+    pending = dream_proposals.list_pending()
+    if not pending:
+        await update.message.reply_text("💭 No pending dream proposals.")
+        return
+    # Plain text only — titles often contain underscores ("night_cycle",
+    # "id=82") that broke Markdown parsing when wrapped in `_..._`. Telegram
+    # rejected the send with 'can't find end of the entity'. Cosmetic italics
+    # aren't worth the failure mode.
+    lines = [f"💭 {len(pending)} pending dream proposals", ""]
+    for i, p in enumerate(pending[:20], 1):
+        lines.append(f"{i}. {p['title']}")
+    if len(pending) > 20:
+        lines.append(f"…and {len(pending) - 20} more.")
+    lines.append("")
+    lines.append("All are memory_correction cleanups — archive or supersede of older memories that newer entries have already replaced. Low-risk by design; the constitution has already rejected anything unsafe.")
+    text = "\n".join(lines)
+    if len(text) > 3800:
+        text = text[:3797] + "…"
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": f"✅ Approve all ({len(pending)})", "callback_data": "dream_approve_all:_"},
+                {"text": f"❌ Reject all ({len(pending)})", "callback_data": "dream_reject_all:_"},
+            ],
+            [
+                {"text": "💬 Show details", "callback_data": "dream_show_all:_"},
+            ],
+        ]
+    }
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if token:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={
+                    "chat_id": update.effective_chat.id,
+                    "text": text,
+                    "reply_markup": keyboard,
+                },
+            )
+
+
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tg_user = update.effective_user
     text = (update.message.text or "").strip()
@@ -493,14 +552,12 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
         return
 
-    # Proactively surface ONE pending dream proposal AND/OR ONE stale task
-    # (if any) BEFORE we run the user's task. They can decide on those
-    # asynchronously via the buttons while the agent works on whatever they
-    # actually asked.
-    try:
-        await _surface_pending_dream_proposal(update, principal)
-    except Exception as e:
-        print(f"[surface] dream error (non-fatal): {e}")
+    # Dream proposal surface removed 2026-06-02: the per-message pop was
+    # interleaving the dream-review surface with the user's actual messages,
+    # which felt wrong and didn't scale (one proposal per inbound message
+    # vs a 38-item backlog). Dream proposals are now reviewed via the
+    # `/dreams` command on demand, plus a daily digest ping from launchd
+    # (com.shupei.agent.dream_digest). Stale-task surfacing kept.
     try:
         await _surface_stale_task(update, principal)
     except Exception as e:
@@ -551,7 +608,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     try:
         agent = await residents.get_resident(
             principal=principal, surface="telegram",
-            profile="mobile", model="claude-opus-4-7",
+            profile="mobile", model="claude-fable-5",
         )
     except Exception as e:
         print(f"[resident] start error: {e!r}")
@@ -665,8 +722,83 @@ async def on_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         print(f"[bd] {tid} -> {action} by tg={update.effective_user.id}")
         return
 
-    # ----- Dream proposal -----
-    if action in ("dream_approve", "dream_reject", "dream_later"):
+    # ----- Dream proposal: batch actions -----
+    if action in ("dream_approve_all", "dream_reject_all", "dream_show_all"):
+        if tg_principal.role != "admin":
+            await cq.answer("admin only", show_alert=True)
+            return
+        pending = dream_proposals.list_pending()
+        if not pending:
+            await cq.edit_message_text(text="💭 No pending dream proposals.")
+            await cq.answer()
+            return
+
+        if action == "dream_show_all":
+            # Send a follow-up message with full titles + rationale snippets.
+            chunks = [f"💭 *Pending dream proposals ({len(pending)})*", ""]
+            for i, p in enumerate(pending, 1):
+                rationale = (p.get("rationale") or "").strip().replace("\n", " ")
+                if len(rationale) > 220:
+                    rationale = rationale[:217] + "…"
+                chunks.append(f"*{i}.* _{p['title']}_")
+                chunks.append(f"   {rationale}")
+                chunks.append("")
+            text = "\n".join(chunks)
+            if len(text) > 3800:
+                text = text[:3797] + "…"
+            token = os.environ.get("TELEGRAM_BOT_TOKEN")
+            if token:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    await client.post(
+                        f"https://api.telegram.org/bot{token}/sendMessage",
+                        json={
+                            "chat_id": update.effective_chat.id,
+                            "text": text,
+                            "parse_mode": "Markdown",
+                            "reply_markup": {
+                                "inline_keyboard": [[
+                                    {"text": f"✅ Approve all ({len(pending)})", "callback_data": "dream_approve_all:_"},
+                                    {"text": f"❌ Reject all ({len(pending)})", "callback_data": "dream_reject_all:_"},
+                                ]]
+                            },
+                        },
+                    )
+            await cq.answer()
+            print(f"[dream] show_all ({len(pending)}) by tg={update.effective_user.id}")
+            return
+
+        ok_count = fail_count = 0
+        for prop in pending:
+            try:
+                if action == "dream_approve_all":
+                    ok, _msg = dream_proposals.approve(
+                        prop["id"], decided_by=f"telegram:{tg_principal.user_id}"
+                    )
+                else:
+                    dream_proposals.reject(
+                        prop["id"], decided_by=f"telegram:{tg_principal.user_id}",
+                        reason="batch-rejected via telegram",
+                    )
+                    ok = True
+                if ok:
+                    ok_count += 1
+                else:
+                    fail_count += 1
+            except Exception:
+                fail_count += 1
+        verb = "Approved" if action == "dream_approve_all" else "Rejected"
+        emoji = "✅" if action == "dream_approve_all" else "❌"
+        await cq.edit_message_text(
+            text=f"{emoji} {verb} {ok_count}/{ok_count + fail_count} proposals."
+                 + (f" ({fail_count} could not be processed)" if fail_count else ""),
+            parse_mode="Markdown",
+        )
+        await cq.answer()
+        print(f"[dream] {action} -> {ok_count} ok / {fail_count} fail by tg={update.effective_user.id}")
+        return
+
+    # ----- Dream proposal: single-item actions (legacy pop, /dreams details) -----
+    if action in ("dream_approve", "dream_reject", "dream_later", "dream_ask"):
         # Anyone admin-role can decide; for now restrict to the original
         # 'shupei' admin (multi-admin can come later).
         if tg_principal.role != "admin":
@@ -700,6 +832,57 @@ async def on_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             # Leave as pending; just acknowledge so the user knows we got it.
             await cq.edit_message_text(
                 text=f"🕒 Will surface again next time: _{prop['title']}_",
+                parse_mode="Markdown",
+            )
+        elif action == "dream_ask":
+            # Surface full evidence in a new chat message with a fresh decision
+            # keyboard. Proposal stays pending. The user can also just reply in
+            # chat and the resident agent will pick it up as a normal turn.
+            evidence_lines = []
+            for ev in (prop.get("evidence") or [])[:6]:
+                snip = (ev.get("content") or "").strip().replace("\n", " ")
+                if len(snip) > 280:
+                    snip = snip[:277] + "…"
+                tag = f"id={ev.get('memory_id')}" if ev.get("memory_id") else f"ep={ev.get('episode_id')}"
+                evidence_lines.append(f"• `{tag}` _({ev.get('scope','?')})_: {snip}")
+            evidence_block = "\n".join(evidence_lines) if evidence_lines else "_(no evidence attached)_"
+            payload = prop.get("payload") or {}
+            action_str = payload.get("action", "?")
+            target = payload.get("target_memory_id") or payload.get("target")
+            full = (
+                f"💭 *{prop['title']}*\n\n"
+                f"*What it would do:* `{action_str}` on `id={target}`\n\n"
+                f"*Why I think so:*\n{prop['rationale']}\n\n"
+                f"*Evidence:*\n{evidence_block}\n\n"
+                f"_Reply in chat with anything you want to ask, or use the buttons below._"
+            )
+            if len(full) > 3800:
+                full = full[:3797] + "…"
+            kb = {
+                "inline_keyboard": [
+                    [
+                        {"text": "✅ Yes, do it", "callback_data": f"dream_approve:{prop['id']}"},
+                        {"text": "❌ No",         "callback_data": f"dream_reject:{prop['id']}"},
+                    ],
+                    [
+                        {"text": "🕒 Ask later",  "callback_data": f"dream_later:{prop['id']}"},
+                    ],
+                ]
+            }
+            token = os.environ.get("TELEGRAM_BOT_TOKEN")
+            if token:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    await client.post(
+                        f"https://api.telegram.org/bot{token}/sendMessage",
+                        json={
+                            "chat_id": update.effective_chat.id,
+                            "text": full,
+                            "parse_mode": "Markdown",
+                            "reply_markup": kb,
+                        },
+                    )
+            await cq.edit_message_text(
+                text=f"💬 Explanation sent below: _{prop['title']}_",
                 parse_mode="Markdown",
             )
         await cq.answer()
@@ -1032,6 +1215,7 @@ def build_app() -> Application:
         .build()
     )
     app.add_handler(CommandHandler("start", on_start))
+    app.add_handler(CommandHandler("dreams", on_dreams))
     app.add_handler(CallbackQueryHandler(on_callback_query))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
     app.add_error_handler(on_error)

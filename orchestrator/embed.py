@@ -16,6 +16,10 @@ import struct
 from functools import lru_cache
 from typing import Sequence
 
+# Suppress HF Hub unauthenticated-request warning. The model is already cached
+# locally; no network check needed. Can be overridden: HF_HUB_OFFLINE=0.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
 DEFAULT_MODEL = "BAAI/bge-m3"
 DEFAULT_DIM = 1024  # bge-m3 dim; recomputed at load time when the model loads
 
@@ -29,6 +33,8 @@ def _model():
     try:
         import torch  # type: ignore
         from sentence_transformers import SentenceTransformer  # type: ignore
+
+
 
         # fp16 on Apple Silicon MPS / CUDA; fp32 on CPU (fp16 is slower there).
         device = (

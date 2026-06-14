@@ -101,7 +101,7 @@ class ResidentAgent:
         principal: Principal,
         surface: str = "telegram",
         profile: str = "mobile",
-        model: str = "claude-opus-4-7",
+        model: str = "claude-fable-5",
         domains: Optional[list[str]] = None,
     ):
         self.principal = principal
@@ -424,7 +424,7 @@ async def get_resident(
     principal: Principal,
     surface: str,
     profile: str = "mobile",
-    model: str = "claude-opus-4-7",
+    model: str = "claude-fable-5",
     domains: Optional[list[str]] = None,
 ) -> ResidentAgent:
     """Get-or-create the resident for (surface, principal). Idempotent.
