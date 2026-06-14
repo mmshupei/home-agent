@@ -16,9 +16,11 @@ import struct
 from functools import lru_cache
 from typing import Sequence
 
-# Suppress HF Hub unauthenticated-request warning. The model is already cached
-# locally; no network check needed. Can be overridden: HF_HUB_OFFLINE=0.
+# Silence HF Hub warnings. Model is already cached locally; HF_HUB_OFFLINE
+# prevents network calls, HF_HUB_VERBOSITY suppresses the unauthenticated-
+# request warning that fires even in offline mode.
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("HF_HUB_VERBOSITY", "error")
 
 DEFAULT_MODEL = "BAAI/bge-m3"
 DEFAULT_DIM = 1024  # bge-m3 dim; recomputed at load time when the model loads
