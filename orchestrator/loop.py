@@ -148,6 +148,7 @@ def build_options(
 
     return ClaudeAgentOptions(
         model=model,
+        fallback_model=["claude-opus-4-8", "claude-sonnet-4-6"],
         system_prompt=system_prompt,
         mcp_servers={
             "agent_test": test_server,
